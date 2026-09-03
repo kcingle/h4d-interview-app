@@ -50,6 +50,12 @@ and past runs — works with no key.
   and the hypothesis's full version lineage with its own per-version
   counts. This page only organizes what interviews already said — it
   never generates a summary interpretation.
+- **Search & Compare** — keyword/tag search over every interview's
+  digest (plain substring matching — no semantic search, no vector DB),
+  returning real, attributed, verbatim quotes; and a side-by-side compare
+  of 2+ interviews on one hypothesis or topic tag. Like Hypothesis
+  Status, this only retrieves and organizes what was already said —
+  never an AI-written "here's the contrast" summary.
 - **Chat** — placeholder; planned for a later step.
 - **Settings** — enter your Anthropic API key (kept only in the browser
   session, not saved to disk).

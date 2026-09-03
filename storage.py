@@ -751,6 +751,140 @@ def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
     return {"counts": counts, "quote_backed": quote_backed, "unsupported": unsupported}
 
 
+def get_all_topic_tags() -> list[str]:
+    """Every distinct topic tag across all digests (only digest_version 2+
+    digests carry topics), sorted, for a search page's quick-pick list."""
+    tags = set()
+    for interview in get_interviews():
+        for run in get_runs_for_interview(interview["id"]):
+            digest = run.get("digest") or {}
+            if digest.get("digest_version", 1) < 2:
+                continue
+            tags.update(digest.get("topics") or [])
+    return sorted(tags)
+
+
+def search_digests(query: str) -> list[dict]:
+    """Keyword/tag search across every interview's digest(s) — plain
+    substring matching over digest text and quotes, no semantic search,
+    no vector DB (a possible future upgrade, not built here). An item
+    matches if `query` appears in its own label/claim text, its quote, OR
+    the interview's topic tags include it. claims_to_verify entries are
+    excluded — they carry no verbatim quote, and every result here must.
+
+    Returns one entry per matching interview (merged across any reruns),
+    each with its own real, de-duplicated quotes — never an invented or
+    synthesized passage. An empty/blank query returns [].
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+
+    results = []
+    for interview in get_interviews():
+        person = get_person_for_interview(interview["id"])
+        passages = []
+        seen_quotes = set()
+
+        for run in get_runs_for_interview(interview["id"]):
+            digest = run.get("digest") or {}
+            if digest.get("digest_version", 1) < 2:
+                continue  # no structured quote data to search
+
+            topic_match = any(q in (t or "").lower() for t in digest.get("topics") or [])
+
+            candidates = []
+            for h in digest.get("hypotheses") or []:
+                for quote in h.get("quotes") or []:
+                    candidates.append({
+                        "kind": "Hypothesis", "label": h.get("claim", ""),
+                        "quote": quote, "status": h.get("status"),
+                    })
+            for p in digest.get("pains") or []:
+                if p.get("quote"):
+                    candidates.append({
+                        "kind": "Pain", "label": p.get("what", ""),
+                        "quote": p["quote"], "strength": p.get("strength"),
+                    })
+            for g in digest.get("gains") or []:
+                if g.get("quote"):
+                    candidates.append({
+                        "kind": "Gain", "label": g.get("what", ""),
+                        "quote": g["quote"], "strength": g.get("strength"),
+                    })
+
+            for c in candidates:
+                text_match = q in c["label"].lower() or q in c["quote"].lower()
+                if not (text_match or topic_match):
+                    continue
+                if c["quote"] in seen_quotes:
+                    continue
+                seen_quotes.add(c["quote"])
+                passages.append({**c, "run_id": run["id"]})
+
+        if passages:
+            results.append({
+                "interview_id": interview["id"],
+                "interview_title": interview["title"],
+                "interviewee": person,
+                "passages": passages,
+            })
+
+    return results
+
+
+def compare_interviews_on_hypothesis(interview_ids: list[int], hypothesis_statement: str) -> list[dict]:
+    """For each interview id, find a run that tested this EXACT hypothesis
+    (same normalized-exact matching as get_hypothesis_status_rollup, for
+    the same reason: no fuzzy matching, to avoid mis-attributing
+    evidence) and return its verdict + verified quotes. An interview
+    that never tested it gets tested=False, not an error."""
+    target = _normalize_hypothesis_text(hypothesis_statement)
+    results = []
+    for interview_id in interview_ids:
+        interview = get_interview(interview_id)
+        person = get_person_for_interview(interview_id)
+        match = None
+        for run in get_runs_for_interview(interview_id):
+            if _normalize_hypothesis_text(run["hypothesis_text"]) != target:
+                continue
+            digest = run.get("digest") or {}
+            if digest.get("digest_version", 1) < 2:
+                continue
+            hyp_entries = digest.get("hypotheses") or []
+            if hyp_entries:
+                match = hyp_entries[0]
+                break
+        results.append({
+            "interview_id": interview_id,
+            "interview_title": interview["title"] if interview else f"Interview #{interview_id}",
+            "interviewee": person,
+            "tested": match is not None,
+            "status": match.get("status") if match else None,
+            "quotes": (match.get("quotes") or []) if match else [],
+        })
+    return results
+
+
+def compare_interviews_on_topic(interview_ids: list[int], topic: str) -> list[dict]:
+    """Same idea as compare_interviews_on_hypothesis but for a topic tag —
+    reuses search_digests, filtered to just the selected interviews."""
+    by_id = {r["interview_id"]: r for r in search_digests(topic)}
+    results = []
+    for interview_id in interview_ids:
+        if interview_id in by_id:
+            results.append(dict(by_id[interview_id]))
+            continue
+        interview = get_interview(interview_id)
+        results.append({
+            "interview_id": interview_id,
+            "interview_title": interview["title"] if interview else f"Interview #{interview_id}",
+            "interviewee": get_person_for_interview(interview_id),
+            "passages": [],
+        })
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Runs — real, working (Step 3)
 # ---------------------------------------------------------------------------
