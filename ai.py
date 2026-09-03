@@ -4,11 +4,12 @@ from this module; they never call an AI API directly. Keeping prompts,
 model calls, and response parsing in one place makes them easy to change
 together without touching any page.
 
-Step 2: implements the two-step interview processing flow described in
-the project plan. Both API calls use `output_config` (structured JSON
-outputs) purely as a parsing aid — it lets the app render every result as
-a real table without touching a single word of the required system
-prompt, which is reproduced verbatim below.
+Through Step 6: the two-step interview analysis flow (Step 2), optional
+reference-document context (Step 5), and a separate, non-crashing
+interviewee-metadata suggestion call (Step 6). All structured-output API
+calls use `output_config` purely as a parsing aid — it lets the app render
+every result as a real table without touching a single word of the
+required system prompt, which is reproduced verbatim below.
 """
 
 import json

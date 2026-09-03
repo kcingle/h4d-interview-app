@@ -49,10 +49,55 @@ def build_digest(hypothesis: str, analysis: dict) -> dict:
     }
 
 
-def build_markdown_report(result: dict, hypothesis: str) -> str:
+def build_export_header(
+    interview: dict | None, person: dict | None, run: dict, document_titles: list[str]
+) -> dict:
+    """Build the header dict for render_analysis's `export_header` param.
+    Callers resolve `person` (via storage.get_person_for_interview) and
+    `document_titles` (via storage.get_document for each of the run's
+    document_ids — using a placeholder string for any that were since
+    deleted) — this function only formats them for display. Never raises:
+    a missing interview/person/documents just renders as "Not recorded"."""
+    interviewee = None
+    if person:
+        label = (person.get("name") or "").strip()
+        sub = ", ".join(x for x in [person.get("role"), person.get("organization")] if x)
+        interviewee = f"{label} ({sub})" if label and sub else (label or None)
+
+    return {
+        "interview_title": interview["title"] if interview else None,
+        "interviewee": interviewee,
+        "date": (run.get("created_at") or "")[:19].replace("T", " ") or None,
+        "documents": ", ".join(document_titles) if document_titles else None,
+    }
+
+
+def _format_header_lines(hypothesis: str, header: dict | None) -> list[str]:
+    """Markdown lines for an export's header block: interview title,
+    interviewee, date, hypothesis tested, and reference documents used.
+    `header` is optional (None renders just the hypothesis line, as
+    before Step 7) so this stays backward compatible with any future
+    caller that doesn't build one."""
+    lines = []
+    if header:
+        if header.get("interview_title"):
+            lines.append(f"**Interview:** {header['interview_title']}")
+        lines.append(f"**Interviewee:** {header.get('interviewee') or 'Not recorded'}")
+        if header.get("date"):
+            lines.append(f"**Date:** {header['date']}")
+    lines.append(f"**Hypothesis tested:** {hypothesis}")
+    if header:
+        lines.append(f"**Reference documents used:** {header.get('documents') or 'Not recorded'}")
+    return lines
+
+
+def build_markdown_report(result: dict, hypothesis: str, header: dict | None = None) -> str:
     """Turn a Step 2 structured result into one markdown document for the
-    Copy/Download buttons."""
-    lines = ["# Interview Analysis", "", f"**Hypothesis tested:** {hypothesis}", ""]
+    Copy/Download buttons. `header` (Step 7, optional) adds interview
+    title/interviewee/date/documents-used lines above the hypothesis line."""
+    lines = ["# Interview Analysis", ""]
+    lines.extend(_format_header_lines(hypothesis, header))
+    lines.append("")
 
     lines.append("## 1. Mom Test audit")
     mom_rows = result.get("mom_test_audit", [])
@@ -125,12 +170,23 @@ def build_markdown_report(result: dict, hypothesis: str) -> str:
     return "\n".join(lines)
 
 
-def render_analysis(result: dict, hypothesis: str, key_prefix: str = "") -> None:
+def render_analysis(
+    result: dict,
+    hypothesis: str,
+    key_prefix: str = "",
+    export_header: dict | None = None,
+) -> None:
     """Render a Step 2 structured result as real tables + text.
 
     `key_prefix` must be unique per call site when this is rendered more
     than once on the same page (e.g. one past run per expander on the
     Interviews page) so the download button's widget key doesn't clash.
+
+    `export_header` (Step 7, optional): a dict from build_export_header()
+    — adds interview title/interviewee/date/documents-used to the top of
+    the exported Markdown/.txt. Omitted lines render as "Not recorded"
+    rather than being skipped, so a run missing metadata or documents
+    still exports cleanly.
     """
     st.subheader("1. Mom Test audit")
     mom_rows = result.get("mom_test_audit", [])
@@ -211,13 +267,31 @@ def render_analysis(result: dict, hypothesis: str, key_prefix: str = "") -> None
 
     st.divider()
     st.subheader("Export")
-    markdown_report = build_markdown_report(result, hypothesis)
-    with st.expander("📋 Copy as Markdown", expanded=False):
-        st.code(markdown_report, language="markdown")
-    st.download_button(
-        "Download .md",
-        data=markdown_report,
-        file_name="interview_analysis.md",
-        mime="text/markdown",
-        key=f"{key_prefix}download_md",
-    )
+    markdown_report = build_markdown_report(result, hypothesis, header=export_header)
+    # No st.expander here (unlike a plain page): render_analysis is often
+    # called from inside an outer expander (one per past run, on the
+    # Interviews and People pages), and Streamlit does not allow nested
+    # expanders — this bit both of those pages from Step 3 onward,
+    # whenever a run was actually expanded, until this fix.
+    st.caption("📋 Copy report — hover the block below and click the copy icon in its corner.")
+    st.code(markdown_report, language="markdown")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download .md",
+            data=markdown_report,
+            file_name="interview_analysis.md",
+            mime="text/markdown",
+            key=f"{key_prefix}download_md",
+        )
+    with col2:
+        # Same content as the Markdown export — plain-text readable as-is
+        # (headers, tables, and lists are all still legible), so this is a
+        # second export format at zero extra cost, no new dependency.
+        st.download_button(
+            "Download .txt",
+            data=markdown_report,
+            file_name="interview_analysis.txt",
+            mime="text/plain",
+            key=f"{key_prefix}download_txt",
+        )

@@ -3,8 +3,37 @@
 A local Streamlit app for processing Hacking for Defense customer-discovery
 interviews. Built iteratively in small, verified steps.
 
-**Current status: Step 1 — skeleton.** No AI yet. Storage layer works for
-interviews; everything else is a placeholder page or stub function.
+**Current status: through Step 6.** The core two-step AI analysis engine,
+interview storage with rerun history, a hypothesis tree, reference
+documents (with a pinned Mom Test doc), and interviewee metadata + a
+People view are all built and working. Chat (Step 7) and cross-interview
+comparison (Step 8) are not built yet.
+
+**Live AI processing (Process Interview page, and the Interviews page's
+rerun control) requires an Anthropic API key**, entered on the Settings
+page. Everything else — browsing/editing hypotheses, documents, people,
+and past runs — works with no key.
+
+## Pages
+
+- **Process Interview** (`app.py`, the home page) — pick reference
+  documents to include, paste interview notes, run the two-step AI flow
+  (clarifying questions, then the full analysis), review results as
+  tables, and confirm interviewee metadata. Saves automatically.
+- **Interviews** — browse every saved interview, review all of its past
+  runs (each kept forever), and rerun it against a different hypothesis
+  without losing earlier runs.
+- **Hypotheses** — build and manage the hypothesis tree: add
+  families/children, edit text, toggle active/dormant. Nothing is ever
+  deleted.
+- **Documents** — upload or paste reference documents the analysis engine
+  can use as context; includes a permanent, protected Mom Test principles
+  doc (pinned, can't be edited or deleted).
+- **People** — browsable table of everyone interviewed, with editable
+  metadata and their linked interview(s)/runs.
+- **Chat** — placeholder; planned for a later step.
+- **Settings** — enter your Anthropic API key (kept only in the browser
+  session, not saved to disk).
 
 ## Architecture
 
@@ -13,14 +42,18 @@ interviews; everything else is a placeholder page or stub function.
   these in the sidebar automatically (numeric prefixes control order and
   are stripped from the displayed name).
 - `ai.py` — **all** AI/LLM logic. Pages never call an AI API directly.
+  Holds the exact graded system prompt (verbatim, never edited).
 - `storage.py` — **all** persistence, backed by SQLite, behind simple
   named functions (`save_interview`, `get_interviews`, ...). If the
   backend is ever swapped to a hosted database, only this file changes.
-- `config.py` — model name / API version. API keys are never hardcoded
-  here — a later step loads them from a local `.env` file or
-  `st.secrets`, entered through the Settings page.
+  Schema changes so far have all been additive migrations, applied
+  automatically the next time the app runs.
+- `render.py` — shared table/markdown rendering for a run's output, used
+  by every page that displays one, so results look identical everywhere.
+- `config.py` — model name / API version.
 - `h4d_app.db` — the SQLite database file. Created automatically the
-  first time the app runs; gitignored.
+  first time the app runs; gitignored (never committed — see Backups
+  below).
 
 ## Setup (Windows PowerShell)
 
@@ -54,22 +87,39 @@ streamlit run app.py
 This opens the app in your browser (usually `http://localhost:8501`).
 Use the sidebar to navigate between pages.
 
-## Testing Step 1
+## Using AI features
 
-1. Launch the app as above.
-2. Confirm you can navigate every page in the sidebar: the home page
-   ("app" — labeled "Process Interview"), Interviews, Hypotheses,
-   Documents, Chat, Settings.
-3. Go to the **Interviews** page. Open the "🧪 Temporary test" box, edit
-   or leave the default title/text, and click **Save to database**.
-4. Confirm a success message appears, and the new row shows up in the
-   table below (it reads live from `h4d_app.db` via `storage.get_interviews()`).
-5. Stop and restart the app — the saved interview should still be there,
-   proving it's persisted to disk, not just session state.
+1. Get an Anthropic API key from console.anthropic.com (separate from a
+   claude.ai chat subscription — it's pay-per-use, billed by usage).
+2. Go to the **Settings** page and paste it in. It's kept only in this
+   browser session, not written to disk.
+3. Go to **Process Interview** to run a real analysis, or **Interviews**
+   to rerun a saved one against a different hypothesis.
+
+Without a key, every other page still works fully (Hypotheses, Documents,
+People, browsing past Interviews) — you just can't trigger new AI calls.
+
+## Backups
+
+`h4d_app.db` holds your real interview data and is intentionally
+gitignored — it's never committed. Dated backup copies live in
+`backups/` (e.g. `backups/h4d_app_2026-09-02.db`), also gitignored, as a
+separate restore point independent of git history.
+
+## Version control
+
+This project is a git repository. To see history or roll back:
+
+```powershell
+git log --oneline
+git diff <commit>              # see what changed since a checkpoint
+git checkout <commit> -- .     # restore code to that checkpoint
+```
+
+Rolling back git never touches `h4d_app.db` — that's restored (if ever
+needed) from a file in `backups/` instead.
 
 ## What's next
 
-See the project plan for Steps 2–8 (core AI processing loop, saved runs,
-hypothesis tree, reference documents, metadata + people, chat, and
-cross-interview comparison). Each step is built and verified before the
-next begins.
+Step 7 (chat) and Step 8 (cross-interview corpus comparison) are not
+built yet. Each step is built and verified before the next begins.

@@ -4,9 +4,10 @@ functions (save_interview, get_interviews, etc.). Pages should never touch
 SQLite directly; if we later swap to a hosted database, only this file
 should need to change.
 
-Step 3: interviews + runs are now fully real, including reruns (every
-processing pass adds a new run row — nothing is ever overwritten).
-Hypotheses/people/documents are still clearly-marked stubs for later steps.
+Through Step 6: interviews, runs (with rerun history + document/hypothesis
+provenance), the hypothesis tree, documents (incl. the pinned Mom Test
+doc), and people/metadata are all fully real. Every schema change so far
+has been an additive migration — see the `_migrate_*` functions below.
 """
 
 import json
@@ -29,14 +30,15 @@ def get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     """Create all tables if they don't exist yet. Safe to call repeatedly.
 
-    Schema anticipates later steps even though most tables aren't used yet:
       - interviews: raw interview text/notes, optionally linked to a person.
-      - people: interviewee metadata (Step 6).
-      - hypotheses: family/version model (e.g. 1, 1a, 1b) with an
-        active-for-testing flag (Step 4).
+      - people: interviewee metadata (Step 6), linked via interviews.person_id.
+      - hypotheses: a branching tree (label like 1, 1a, 1b) with an
+        active/dormant state (Step 4).
       - runs: one row per AI processing pass over an interview, so
-        reruns against different hypotheses never overwrite history (Step 3).
-      - run_hypotheses: join table — which hypotheses a given run tested.
+        reruns against different hypotheses never overwrite history (Step 3);
+        also records which reference documents were used (Step 5).
+      - run_hypotheses: NOT currently used by any code — see the Step 6
+        cleanup review for details; left in place pending a decision.
       - documents: reference docs, incl. a pinned Mom Test doc (Step 5).
     """
     conn = get_connection()
@@ -335,6 +337,22 @@ def get_interview(interview_id: int) -> dict | None:
         row = conn.execute(
             "SELECT id, title, raw_text, notes, person_id, created_at "
             "FROM interviews WHERE id = ?",
+            (interview_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_person_for_interview(interview_id: int) -> dict | None:
+    """Return the person linked to this interview (via
+    interviews.person_id), or None if it has no metadata yet. Used by
+    Step 7 export to show the interviewee on a run's export header."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            f"SELECT {_PEOPLE_COLUMNS} FROM people WHERE id = "
+            "(SELECT person_id FROM interviews WHERE id = ?)",
             (interview_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -688,6 +706,18 @@ def get_documents() -> list[dict]:
         return [dict(row) for row in rows]
     finally:
         conn.close()
+
+
+def get_document_titles(document_ids: list[int]) -> list[str]:
+    """Resolve a run's stored document_ids to titles, for the Step 7
+    export header. A document deleted since the run was saved still shows
+    (as "Document #N (deleted)") rather than silently vanishing from the
+    provenance record."""
+    titles = []
+    for doc_id in document_ids:
+        doc = get_document(doc_id)
+        titles.append(doc["title"] if doc else f"Document #{doc_id} (deleted)")
+    return titles
 
 
 def get_document(document_id: int) -> dict | None:

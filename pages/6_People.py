@@ -7,7 +7,7 @@ each interview's runs (reusing the same table rendering as elsewhere).
 import streamlit as st
 
 import storage
-from render import render_analysis
+from render import build_export_header, render_analysis
 
 RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
 
@@ -85,7 +85,14 @@ if not selected["interviews"]:
 else:
     for interview in selected["interviews"]:
         when = interview["created_at"][:19].replace("T", " ")
-        with st.expander(f"{interview['title']} — {when}"):
+        # A bordered container, not st.expander, here — each run below
+        # gets its own expander, and Streamlit doesn't allow nesting one
+        # expander inside another (this combination has crashed the page
+        # for any person with a linked run since Step 6; fixed now as
+        # part of Step 7, whose export controls sit inside that same
+        # per-run expander).
+        with st.container(border=True):
+            st.markdown(f"**{interview['title']}** — {when}")
             runs = storage.get_runs_for_interview(interview["id"])
             if not runs:
                 st.write("No runs yet for this interview.")
@@ -93,6 +100,12 @@ else:
                 for i, run in enumerate(runs, start=1):
                     run_when = run["created_at"][:19].replace("T", " ")
                     with st.expander(f"Run {i} — hypothesis: {run['hypothesis_text']} — {run_when}"):
+                        export_header = build_export_header(
+                            interview, selected, run, storage.get_document_titles(run["document_ids"])
+                        )
                         render_analysis(
-                            run["output"], run["hypothesis_text"], key_prefix=f"person_run_{run['id']}_"
+                            run["output"],
+                            run["hypothesis_text"],
+                            key_prefix=f"person_run_{run['id']}_",
+                            export_header=export_header,
                         )

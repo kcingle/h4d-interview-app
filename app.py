@@ -1,9 +1,12 @@
 """
 app.py — Entry point for the Streamlit app. This is the "Process Interview"
-home page: paste raw interview notes, run the two-step AI analysis, and
-review the results as real tables. On completion the interview and this
-first run are saved automatically (Step 3) — reruns against a different
-hypothesis happen from the Interviews page instead. Run with:
+home page: pick which reference documents to include, paste raw interview
+notes, run the two-step AI analysis, and review the results as real
+tables. On completion the interview and this first run are saved
+automatically (Step 3), followed by a suggest-and-confirm interviewee
+metadata form (Step 6) — nothing is saved there until you confirm. Reruns
+against a different hypothesis happen from the Interviews page instead.
+Run with:
 
     streamlit run app.py
 
@@ -17,7 +20,7 @@ import streamlit as st
 
 import ai
 import storage  # noqa: F401  (importing this ensures the SQLite DB/tables exist)
-from render import DEFAULT_HYPOTHESIS, build_digest, render_analysis
+from render import DEFAULT_HYPOTHESIS, build_digest, build_export_header, render_analysis
 
 RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
 
@@ -190,4 +193,17 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
 
     st.divider()
     st.header("Analysis results")
-    render_analysis(st.session_state.step2_result, DEFAULT_HYPOTHESIS)
+
+    # Step 7: export header. Resolved fresh each render so it reflects a
+    # just-confirmed metadata save (this section is reached again via the
+    # st.rerun() above) without any extra session-state tracking.
+    export_interview = storage.get_interview(interview_id) if interview_id else None
+    export_person = storage.get_person_for_interview(interview_id) if interview_id else None
+    export_runs = storage.get_runs_for_interview(interview_id) if interview_id else []
+    export_run = export_runs[-1] if export_runs else {}
+    export_doc_titles = storage.get_document_titles(export_run.get("document_ids", []))
+    export_header = build_export_header(export_interview, export_person, export_run, export_doc_titles)
+
+    render_analysis(
+        st.session_state.step2_result, DEFAULT_HYPOTHESIS, export_header=export_header
+    )

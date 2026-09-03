@@ -8,7 +8,7 @@ import streamlit as st
 
 import ai
 import storage
-from render import DEFAULT_HYPOTHESIS, build_digest, render_analysis
+from render import DEFAULT_HYPOTHESIS, build_digest, build_export_header, render_analysis
 
 st.set_page_config(page_title="H4D Interview App — Interviews", page_icon="🗂️")
 
@@ -43,6 +43,8 @@ st.divider()
 st.subheader("Past runs")
 
 runs = storage.get_runs_for_interview(selected["id"])
+# Step 7: same person for every run of this interview — look up once.
+interview_person = storage.get_person_for_interview(selected["id"])
 
 if not runs:
     st.write("No runs yet for this interview.")
@@ -50,7 +52,15 @@ else:
     for i, run in enumerate(runs, start=1):
         when = run["created_at"][:19].replace("T", " ")
         with st.expander(f"Run {i} — hypothesis: {run['hypothesis_text']} — {when}"):
-            render_analysis(run["output"], run["hypothesis_text"], key_prefix=f"run_{run['id']}_")
+            export_header = build_export_header(
+                selected, interview_person, run, storage.get_document_titles(run["document_ids"])
+            )
+            render_analysis(
+                run["output"],
+                run["hypothesis_text"],
+                key_prefix=f"run_{run['id']}_",
+                export_header=export_header,
+            )
 
 st.divider()
 st.subheader("Rerun this interview")
