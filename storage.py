@@ -745,6 +745,22 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
         conn.close()
 
 
+def update_run_digest(run_id: int, digest: dict) -> None:
+    """Replace a run's stored digest in place. No schema change needed —
+    digest_json has always been a flexible JSON column. Used to backfill
+    a run saved before the rich digest existed, to refresh one once
+    interviewee metadata is confirmed shortly after a run is first saved,
+    or just to regenerate on demand."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE runs SET digest_json = ? WHERE id = ?", (json.dumps(digest), run_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # People — real, working (Step 6; extended with rank/branch/status)
 # ---------------------------------------------------------------------------

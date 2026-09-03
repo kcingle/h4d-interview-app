@@ -20,7 +20,7 @@ import streamlit as st
 
 import ai
 import storage  # noqa: F401  (importing this ensures the SQLite DB/tables exist)
-from render import DEFAULT_HYPOTHESIS, build_digest, build_export_header, render_analysis
+from render import DEFAULT_HYPOTHESIS, build_export_header, render_analysis
 
 RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
 INTERVIEW_STATUS_OPTIONS = list(storage.ALLOWED_INTERVIEW_STATUSES)
@@ -137,7 +137,10 @@ if st.session_state.flow_stage in ("awaiting_answers", "done"):
             # interview + its first run — rerunning an existing saved
             # interview against a different hypothesis happens on the
             # Interviews page instead, and never overwrites this one.
-            digest = build_digest(DEFAULT_HYPOTHESIS, analysis)
+            # `person=None` here — interviewee metadata isn't confirmed
+            # until the form just below; the digest is refreshed with the
+            # interviewee filled in right after that confirm happens.
+            digest = ai.build_digest(DEFAULT_HYPOTHESIS, analysis, raw_notes, api_key, person=None)
             title = interview_title.strip() or default_title
             interview_id = storage.save_interview(title, raw_notes)
             document_ids = [d["id"] for d in docs_for_step2]
@@ -221,6 +224,19 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                     interview_status=m_status,
                 )
                 storage.set_interview_person(interview_id, person_id)
+
+                # Refresh this interview's digest now that the interviewee
+                # is known — it was built with person=None a few lines up,
+                # before this form existed to confirm it.
+                person = storage.get_person(person_id)
+                existing_runs = storage.get_runs_for_interview(interview_id)
+                if existing_runs:
+                    latest_run = existing_runs[-1]
+                    refreshed_digest = ai.build_digest(
+                        DEFAULT_HYPOTHESIS, latest_run["output"], raw_notes, api_key, person
+                    )
+                    storage.update_run_digest(latest_run["id"], refreshed_digest)
+
                 st.session_state.metadata_saved = True
                 st.rerun()
 

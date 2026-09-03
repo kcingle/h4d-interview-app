@@ -23,7 +23,8 @@ and past runs — works with no key.
   tables, and confirm interviewee metadata. Saves automatically.
 - **Interviews** — browse every saved interview, review all of its past
   runs (each kept forever, each exportable to Markdown/.txt with a
-  provenance header), and rerun it against a different hypothesis
+  provenance header), inspect or regenerate that run's structured digest
+  (see below), and rerun the interview against a different hypothesis
   without losing earlier runs.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, toggle active/dormant. Nothing is ever
@@ -66,6 +67,28 @@ and past runs — works with no key.
 - `h4d_app.db` — the SQLite database file. Created automatically the
   first time the app runs; gitignored (never committed — see Backups
   below).
+
+## The per-run digest
+
+Every processed run is saved with a structured **digest** (`ai.build_digest`)
+in addition to its full output — a compact, quote-anchored summary meant
+for future corpus-level features (testing a hypothesis across every
+interview, cross-interview search, side-by-side compare) to read instead
+of dozens of full transcripts. It includes, per run: the interviewee (once
+metadata is confirmed), each hypothesis's verdict with its verbatim
+evidence quote(s), key pains/gains with their verbatim quotes, a short
+list of topic tags, and the claims-to-verify list.
+
+**Every quote is checked against that interview's actual raw text before
+being kept** — an unverifiable or fabricated quote is dropped, not
+included, matching the same anti-fabrication rule as the main analysis.
+Topic tags are the one part that needs an API key (a small, separate,
+non-crashing call); everything else works with no key.
+
+A run processed before this existed has an old, thin digest — the
+Interviews page shows this and offers a **Regenerate digest** button,
+which rebuilds it from that run's already-saved output (no reprocessing,
+no re-reading the transcript through the two-step flow again).
 
 ## Setup (Windows PowerShell)
 

@@ -8,7 +8,7 @@ import streamlit as st
 
 import ai
 import storage
-from render import DEFAULT_HYPOTHESIS, build_digest, build_export_header, render_analysis
+from render import DEFAULT_HYPOTHESIS, build_export_header, render_analysis
 
 st.set_page_config(page_title="H4D Interview App — Interviews", page_icon="🗂️")
 
@@ -45,6 +45,7 @@ st.subheader("Past runs")
 runs = storage.get_runs_for_interview(selected["id"])
 # Step 7: same person for every run of this interview — look up once.
 interview_person = storage.get_person_for_interview(selected["id"])
+digest_api_key = st.session_state.get("api_key", "")
 
 if not runs:
     st.write("No runs yet for this interview.")
@@ -61,6 +62,28 @@ else:
                 key_prefix=f"run_{run['id']}_",
                 export_header=export_header,
             )
+
+            st.divider()
+            st.subheader("Digest (for corpus features)")
+            digest = run.get("digest") or {}
+            if digest.get("digest_version", 1) >= 2:
+                st.json(digest)
+            else:
+                st.caption(
+                    "This run has an old, thin digest from before the richer "
+                    "format existed — regenerate it below."
+                )
+            if st.button("🔄 Regenerate digest", key=f"regen_digest_{run['id']}"):
+                new_digest = ai.build_digest(
+                    run["hypothesis_text"],
+                    run["output"],
+                    selected["raw_text"],
+                    digest_api_key,
+                    interview_person,
+                )
+                storage.update_run_digest(run["id"], new_digest)
+                st.success("Digest regenerated.")
+                st.rerun()
 
 st.divider()
 st.subheader("Rerun this interview")
@@ -119,7 +142,9 @@ if st.session_state[rerun_stage_key] == "awaiting_answers":
                 rerun_history = st.session_state[f"rerun_history_{interview_id}"]
                 analysis = ai.run_step2(rerun_history, rerun_questions, rerun_answers, api_key)
             hypothesis_used = st.session_state[f"rerun_hypothesis_used_{interview_id}"]
-            digest = build_digest(hypothesis_used, analysis)
+            digest = ai.build_digest(
+                hypothesis_used, analysis, selected["raw_text"], api_key, interview_person
+            )
             # Step 5: no document checklist on this rerun control yet
             # (only the Process Interview page has one) — record an empty
             # document set rather than omitting provenance entirely.

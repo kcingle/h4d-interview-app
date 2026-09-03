@@ -2,9 +2,9 @@
 render.py — Shared Streamlit rendering for one processed interview's
 output. Used by both app.py (a freshly-computed result) and
 pages/1_Interviews.py (a past run's saved output), so both places render
-tables identically. Not AI logic (ai.py owns the API calls) and not
-persistence (storage.py owns the database) — purely presentation plus one
-small derived-data helper (build_digest).
+tables identically. Not AI logic (ai.py owns the API calls, including
+building the per-run digest — see ai.build_digest) and not persistence
+(storage.py owns the database) — purely presentation.
 
 pages/1_Interviews.py can't simply `import app` for this, since app.py's
 top-level code is the actual Streamlit page — importing it would re-run
@@ -26,27 +26,6 @@ DEFAULT_HYPOTHESIS = (
 def _md_cell(text: str) -> str:
     """Escape a value for safe placement inside a markdown table cell."""
     return str(text).replace("|", "\\|").replace("\n", "<br>")
-
-
-def build_digest(hypothesis: str, analysis: dict) -> dict:
-    """A small structured summary of one run, derived entirely from its
-    own AI output — no extra AI call. Kept small; intended for the
-    cross-interview corpus comparison planned for a much later step."""
-    ledger = analysis.get("hypothesis_ledger", [])
-    status = ledger[0]["status"] if ledger else "Untested"
-    pg_rows = analysis.get("pains_and_gains", [])
-    pain_count = sum(1 for r in pg_rows if r.get("attribute_type") == "Pain")
-    gain_count = sum(1 for r in pg_rows if r.get("attribute_type") == "Gain")
-    key_learning = analysis.get("slack_writeup", {}).get("what_we_learned", "")
-
-    return {
-        "hypothesis": hypothesis,
-        "status": status,
-        "pain_count": pain_count,
-        "gain_count": gain_count,
-        "claims_to_verify_count": len(analysis.get("claims_to_verify", [])),
-        "key_learning": key_learning[:280],
-    }
 
 
 def build_export_header(

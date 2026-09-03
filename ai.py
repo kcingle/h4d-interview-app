@@ -14,6 +14,7 @@ required system prompt, which is reproduced verbatim below.
 
 import base64
 import json
+import re
 
 import anthropic
 
@@ -445,3 +446,164 @@ def suggest_metadata(raw_notes: str, api_key: str) -> dict:
         return {field: (data.get(field) or "") for field in BLANK_METADATA}
     except Exception:
         return dict(BLANK_METADATA)
+
+
+# ---------------------------------------------------------------------------
+# Per-interview digest — rich, structured, quote-anchored. This is what
+# later corpus-level features (testing a hypothesis across every
+# interview, cross-interview search, side-by-side compare) read INSTEAD
+# of full transcripts, since sending dozens of full transcripts to the
+# model at once isn't viable. Every evidence item is verified against the
+# interview's actual raw text before being kept — the same anti-
+# fabrication rule as the main analysis, enforced again here rather than
+# just trusted a second time.
+# ---------------------------------------------------------------------------
+
+DIGEST_VERSION = 2
+
+_TOPIC_TAGS_SYSTEM_PROMPT = (
+    "You are extracting short topic/keyword tags for a processed DoD "
+    "customer-discovery interview, to make later cross-interview search "
+    "possible. Given the hypothesis tested and a summary of what was "
+    "found, suggest 3 to 8 short topic tags (a few words each, lowercase, "
+    "no punctuation) capturing the interview's main themes. Do not invent "
+    "themes the summary doesn't support."
+)
+
+_TOPIC_TAGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+    },
+    "required": ["topics"],
+    "additionalProperties": False,
+}
+
+
+def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
+    """Suggest short topic/keyword tags. This is the one small, separate
+    AI call the digest adds — nothing in the Step 2 output already
+    produces tags. Fed the CONDENSED analysis (pains/gains + Slack
+    write-up), not the full raw notes again, to keep it cheap. NEVER
+    raises; falls back to [] with no key or on any failure."""
+    if not api_key or not api_key.strip():
+        return []
+    try:
+        summary_bits = [
+            f"{pg.get('attribute_type', '')}: {pg.get('what_it_is', '')}"
+            for pg in analysis.get("pains_and_gains", [])
+        ]
+        summary_bits.append(analysis.get("slack_writeup", {}).get("what_we_learned", ""))
+        summary_text = "\n".join(b for b in summary_bits if b)
+
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=config.MODEL_NAME,
+            max_tokens=256,
+            system=_TOPIC_TAGS_SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": f"Hypothesis: {hypothesis}\n\nSummary:\n{summary_text}"}
+            ],
+            output_config={"format": {"type": "json_schema", "schema": _TOPIC_TAGS_SCHEMA}},
+        )
+        text = next(b.text for b in response.content if b.type == "text")
+        data = json.loads(text)
+        return [t.strip() for t in data.get("topics", []) if isinstance(t, str) and t.strip()]
+    except Exception:
+        return []
+
+
+def _normalize_for_match(text: str) -> str:
+    """Collapse whitespace and common curly-quote/apostrophe variants to
+    their straight equivalents, so a trivial Unicode presentation
+    difference doesn't wrongly fail the verbatim check below."""
+    text = (text or "").replace("‘", "'").replace("’", "'")
+    text = text.replace("“", '"').replace("”", '"')
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _quote_appears_in_notes(quote: str, raw_notes: str) -> bool:
+    """The verbatim check: is `quote` an exact substring of the
+    interview's actual raw text, once whitespace/quote-style differences
+    are normalized away? If not, it isn't evidence."""
+    if not quote or not quote.strip():
+        return False
+    return _normalize_for_match(quote) in _normalize_for_match(raw_notes)
+
+
+def _extract_verified_quotes(evidence: str, raw_notes: str) -> list[str]:
+    """Pull double-quoted spans out of a hypothesis ledger row's
+    free-form Evidence text, and keep only the ones that verify verbatim
+    against raw_notes. Falls back to treating the whole Evidence string
+    as one quote if IT verifies as-is (a row might state its quote
+    without wrapping it in quotation marks). Returns [] — no invented
+    fallback — if nothing verifies."""
+    quoted_spans = re.findall(r'"([^"]+)"', evidence or "")
+    verified = [q for q in quoted_spans if _quote_appears_in_notes(q, raw_notes)]
+    if verified:
+        return verified
+    if _quote_appears_in_notes(evidence, raw_notes):
+        return [evidence.strip()]
+    return []
+
+
+def build_digest(
+    hypothesis: str,
+    analysis: dict,
+    raw_notes: str,
+    api_key: str = "",
+    person: dict | None = None,
+) -> dict:
+    """Build the rich, quote-anchored digest for one processed run.
+    Derived mostly from the already-computed Step 2 `analysis` — no full
+    re-read needed for hypotheses or pains/gains, which already carry (or
+    can be checked against) verbatim quotes. The one new, small AI call
+    is for topic tags (see _suggest_topics); it never raises, so this
+    function always returns a complete, valid digest — with an empty
+    topics list when there's no key or that call fails — never crashing
+    and never leaving other fields incomplete because of it.
+
+    `person` (optional): the interviewee's metadata, if already known.
+    Often not yet known when a run is first saved (metadata confirmation
+    happens right after) — pass None then, and call this again once
+    confirmed to refresh the digest's interviewee field.
+    """
+    hypotheses_digest = [
+        {
+            "claim": row.get("claim", ""),
+            "status": row.get("status", "Untested"),
+            "quotes": _extract_verified_quotes(row.get("evidence", ""), raw_notes),
+        }
+        for row in analysis.get("hypothesis_ledger", [])
+    ]
+
+    pains, gains = [], []
+    for row in analysis.get("pains_and_gains", []):
+        quote = row.get("verbatim_quote", "")
+        if not _quote_appears_in_notes(quote, raw_notes):
+            continue  # unverified — dropped, not propagated
+        entry = {
+            "what": row.get("what_it_is", ""),
+            "quote": quote,
+            "strength": row.get("evidence_strength", ""),
+        }
+        (pains if row.get("attribute_type") == "Pain" else gains).append(entry)
+
+    interviewee = None
+    if person:
+        interviewee = {
+            "name": person.get("name") or "",
+            "role": person.get("role") or "",
+            "organization": person.get("organization") or "",
+        }
+
+    return {
+        "digest_version": DIGEST_VERSION,
+        "hypothesis": hypothesis,
+        "interviewee": interviewee,
+        "hypotheses": hypotheses_digest,
+        "pains": pains,
+        "gains": gains,
+        "topics": _suggest_topics(hypothesis, analysis, api_key),
+        "claims_to_verify": list(analysis.get("claims_to_verify", [])),
+    }
