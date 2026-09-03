@@ -28,11 +28,19 @@ and past runs — works with no key.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, toggle active/dormant. Nothing is ever
   deleted.
-- **Documents** — upload or paste reference documents the analysis engine
-  can use as context; includes a permanent, protected Mom Test principles
-  doc (pinned, can't be edited or deleted).
-- **People** — browsable table of everyone interviewed, with editable
-  metadata and their linked interview(s)/runs (also exportable).
+- **Documents** — upload (.txt, .md, or .pdf) or paste reference
+  documents the analysis engine can use as context. Includes a
+  permanent, protected pinned slot for the Mom Test book PDF (upload it
+  here) — pinned documents are a separate, mandatory category: always
+  included on every analysis, never a toggle, and can't be deleted
+  (though the PDF itself can be replaced any time). Every other document
+  is opt-in, toggled per-interview on the Process Interview page. PDFs
+  are sent to Claude natively (it reads the actual pages) — no
+  text-extraction step, no extra dependency.
+- **People** — browsable/filterable/sortable table of everyone
+  interviewed (name, role, organization, rank, branch/service, seniority,
+  relationship, interview status, date, descriptor), with an editable
+  form per person and their linked interview(s)/runs (also exportable).
 - **Chat** — placeholder; planned for a later step.
 - **Settings** — enter your Anthropic API key (kept only in the browser
   session, not saved to disk).

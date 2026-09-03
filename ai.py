@@ -12,6 +12,7 @@ every result as a real table without touching a single word of the
 required system prompt, which is reproduced verbatim below.
 """
 
+import base64
 import json
 
 import anthropic
@@ -70,20 +71,25 @@ itself a failure, since DoD requirements interviews legitimately probe future ne
 
 def _build_system(documents: list[dict] | None):
     """Build the `system` request parameter. Returns the bare SYSTEM_PROMPT
-    string, unchanged, when no documents are selected (Step 2/3/4
-    behavior). When documents ARE selected (Step 5), returns a list of two
-    text blocks instead: the untouched system prompt, plus a separate,
-    clearly-labeled reference-material block — the prompt string itself is
-    never edited.
+    string, unchanged, when no TEXT-format documents are selected (Step
+    2/3/4 behavior). When there ARE text-format documents (Step 5),
+    returns a list of two text blocks instead: the untouched system
+    prompt, plus a separate, clearly-labeled reference-material block —
+    the prompt string itself is never edited.
 
-    NOTE: only documents the user actually checked are sent. If many large
-    reference documents are ever selected at once this will grow input
-    tokens noticeably — revisit (e.g. summarizing or truncating) if that
-    becomes a real cost/context problem.
+    PDF-format documents are NOT included here — Claude reads a PDF
+    natively as a document content block, which the API only accepts in
+    a user message, not the system prompt. See _build_user_message_content.
+
+    NOTE: only documents the user actually included are sent. If many
+    large reference documents are ever selected at once this will grow
+    input tokens noticeably — revisit (e.g. summarizing or truncating) if
+    that becomes a real cost/context problem.
     """
-    if not documents:
+    text_documents = [d for d in (documents or []) if d.get("content_format", "text") == "text"]
+    if not text_documents:
         return SYSTEM_PROMPT
-    sections = "\n\n".join(f"### {d['title']}\n{d['content']}" for d in documents)
+    sections = "\n\n".join(f"### {d['title']}\n{d['content']}" for d in text_documents)
     reference_block = (
         "REFERENCE MATERIAL — background context provided by the team, not "
         "part of the interview. Use it to inform judgment; never quote it or "
@@ -93,6 +99,40 @@ def _build_system(documents: list[dict] | None):
         {"type": "text", "text": SYSTEM_PROMPT},
         {"type": "text", "text": reference_block},
     ]
+
+
+def _build_user_message_content(user_text: str, documents: list[dict] | None):
+    """Build the content of the FIRST user message. Returns the plain
+    `user_text` string unchanged when there are no PDF-format documents
+    to attach (the common case) or the accumulated reference documents
+    aren't yet uploaded (falsy content is skipped, never sent empty).
+
+    When there IS at least one uploaded PDF, returns a list instead: one
+    native `document` content block per PDF (Claude reads the actual
+    pages directly — no text extraction, no new dependency, just stdlib
+    base64), followed by a final text block with `user_text`. This only
+    needs to happen on the first message of the conversation — run_step2
+    replays this same history rather than re-attaching the PDF(s) again.
+    """
+    pdf_documents = [
+        d for d in (documents or [])
+        if d.get("content_format") == "pdf" and d.get("content")
+    ]
+    if not pdf_documents:
+        return user_text
+
+    blocks = []
+    for d in pdf_documents:
+        blocks.append({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.standard_b64encode(d["content"]).decode("utf-8"),
+            },
+        })
+    blocks.append({"type": "text", "text": user_text})
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -268,17 +308,21 @@ def run_step1(
     """Step 1: ask up to three clarifying questions about the interview.
 
     `documents` (Step 5, optional): reference documents to include as
-    context — each a dict with at least "title" and "content".
+    context — each a dict with at least "title", "content", and
+    "content_format" ("text" or "pdf"). Text documents join the system
+    prompt as reference material; PDF documents attach natively to this
+    first user message instead (see _build_user_message_content).
 
     Returns {"questions": [...], "history": [user_msg, assistant_msg]}.
     `history` is the two-message exchange to replay into run_step2 so the
     conversation stays intact across both steps.
     """
     client = _client(api_key)
-    user_content = (
+    user_text = (
         f"Hypotheses being tested:\n- {hypothesis}\n\n"
         f"Raw interview notes:\n{raw_notes}"
     )
+    user_content = _build_user_message_content(user_text, documents)
     response = _call(
         client,
         messages=[{"role": "user", "content": user_content}],
@@ -339,10 +383,14 @@ _METADATA_SYSTEM_PROMPT = (
     "based only on what is explicit or strongly implied in the notes: a "
     "name, or a descriptive label if anonymous (e.g. an org+role like "
     "'CENTCOM action officer'); role/title; organization/unit; seniority "
-    "level; relationship to the problem (must be exactly 'beneficiary', "
-    "'adjacent', 'expert', or blank if unclear); and a one-line descriptor "
-    "summarizing who they are. Leave any field blank (empty string) rather "
-    "than guessing — never invent details the notes don't support."
+    "level; military rank if stated or clearly implied (e.g. 'Maj / O-4'); "
+    "branch of service if stated or clearly implied (e.g. Army, Air Force, "
+    "Navy, Marines, Space Force, or civilian/other); relationship to the "
+    "problem (must be exactly 'beneficiary', 'adjacent', 'expert', or blank "
+    "if unclear); and a one-line descriptor summarizing who they are. Leave "
+    "any field blank (empty string) rather than guessing — never invent "
+    "details the notes don't support. Do not guess a date or interview "
+    "status; those are not part of this task."
 )
 
 _METADATA_SCHEMA = {
@@ -352,12 +400,14 @@ _METADATA_SCHEMA = {
         "role": {"type": "string"},
         "organization": {"type": "string"},
         "seniority_level": {"type": "string"},
+        "rank": {"type": "string"},
+        "branch_service": {"type": "string"},
         "relationship": {"type": "string", "enum": ["", "beneficiary", "adjacent", "expert"]},
         "descriptor": {"type": "string"},
     },
     "required": [
-        "name_or_label", "role", "organization", "seniority_level",
-        "relationship", "descriptor",
+        "name_or_label", "role", "organization", "seniority_level", "rank",
+        "branch_service", "relationship", "descriptor",
     ],
     "additionalProperties": False,
 }
@@ -367,6 +417,8 @@ BLANK_METADATA = {
     "role": "",
     "organization": "",
     "seniority_level": "",
+    "rank": "",
+    "branch_service": "",
     "relationship": "",
     "descriptor": "",
 }

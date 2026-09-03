@@ -10,6 +10,7 @@ doc), and people/metadata are all fully real. Every schema change so far
 has been an additive migration — see the `_migrate_*` functions below.
 """
 
+import base64
 import json
 import sqlite3
 from pathlib import Path
@@ -57,6 +58,9 @@ def init_db() -> None:
                 relationship TEXT,
                 interview_date TEXT,
                 descriptor TEXT,
+                rank TEXT,
+                branch_service TEXT,
+                interview_status TEXT NOT NULL DEFAULT 'completed',
                 created_at TEXT NOT NULL
             );
 
@@ -96,6 +100,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
                 content TEXT,
+                content_format TEXT NOT NULL DEFAULT 'text',
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
@@ -104,10 +109,13 @@ def init_db() -> None:
         _migrate_runs_table(conn)
         _migrate_hypotheses_table(conn)
         _migrate_people_table(conn)
+        _migrate_documents_table(conn)
         _cleanup_dead_schema_v1(conn)
         _seed_hypotheses_if_empty(conn)
         _seed_mom_test_document_if_missing(conn)
+        _replace_mom_test_text_with_pdf_slot(conn)
         _seed_people_if_empty(conn)
+        _backfill_seed_people_new_fields(conn)
         conn.commit()
     finally:
         conn.close()
@@ -209,7 +217,10 @@ def _seed_hypotheses_if_empty(conn: sqlite3.Connection) -> None:
 
 # --- SEED DATA (Step 5 pinned Mom Test doc) ---------------------------------
 # Only fires when no pinned document exists yet; never overwrites existing
-# documents. This is an original plain-language summary, not the book's text.
+# documents. The pinned slot is now an empty PDF placeholder — upload the
+# actual book via the Documents page. _MOM_TEST_SEED_CONTENT is kept only
+# as the known original text, so _replace_mom_test_text_with_pdf_slot()
+# below can recognize (and convert) a database seeded before this change.
 _MOM_TEST_SEED_CONTENT = """\
 - Ground every question in the interviewee's actual life and past behavior — not your idea, and not hypotheticals.
 - Ask about specific things that already happened ("What's the last time this came up, and what did you do?"), never "Would you..." or "Do you think you'd..."
@@ -219,32 +230,85 @@ _MOM_TEST_SEED_CONTENT = """\
 - Every claim in an analysis should trace back to something the interviewee actually said or did, never to what they said they would do.
 """
 
+MOM_TEST_TITLE = "The Mom Test (PDF)"
+
 
 def _seed_mom_test_document_if_missing(conn: sqlite3.Connection) -> None:
     count = conn.execute("SELECT COUNT(*) FROM documents WHERE is_pinned = 1").fetchone()[0]
     if count:
         return
     conn.execute(
-        "INSERT INTO documents (title, content, is_pinned, created_at) VALUES (?, ?, 1, ?)",
-        ("The Mom Test (principles)", _MOM_TEST_SEED_CONTENT, _now()),
+        "INSERT INTO documents (title, content, content_format, is_pinned, created_at) "
+        "VALUES (?, '', 'pdf', 1, ?)",
+        (MOM_TEST_TITLE, _now()),
     )
+
+
+def _replace_mom_test_text_with_pdf_slot(conn: sqlite3.Connection) -> None:
+    """One-time replace of the original seeded Mom Test TEXT document
+    with an empty, pinned PDF slot to upload the real book into. Only
+    touches a row whose content still exactly matches the known original
+    auto-generated text — since update_document already refuses to edit
+    pinned documents, in practice this can only ever match an untouched
+    original seed, never something you've since changed. Idempotent:
+    once converted, content is empty and no longer matches, so this is a
+    no-op on every later call. A fresh database never has this row in
+    the first place (seeded directly as an empty PDF slot above), so
+    this is also a no-op there.
+    """
+    rows = conn.execute(
+        "SELECT id FROM documents WHERE is_pinned = 1 AND content = ?",
+        (_MOM_TEST_SEED_CONTENT,),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE documents SET title = ?, content = '', content_format = 'pdf' WHERE id = ?",
+            (MOM_TEST_TITLE, row["id"]),
+        )
 
 
 def _migrate_people_table(conn: sqlite3.Connection) -> None:
     """Add Step 6's new `people` columns to a database created before Step
     6 existed. A no-op on a fresh database. (The old `email`/`notes`
     columns this docstring used to mention here were removed entirely by
-    the schema cleanup — see _cleanup_dead_schema_v1 below.)"""
+    the schema cleanup — see _cleanup_dead_schema_v1 below.)
+
+    Also adds the People-metadata-extension columns (`rank`,
+    `branch_service`, `interview_status`) for a database created before
+    that extension existed. `interview_status`'s DEFAULT 'completed'
+    backfills every existing row automatically the moment the column is
+    added — that's the "default completed for existing records" behavior,
+    with no separate UPDATE needed.
+    """
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
     migrations = {
         "seniority_level": "ALTER TABLE people ADD COLUMN seniority_level TEXT",
         "relationship": "ALTER TABLE people ADD COLUMN relationship TEXT",
         "interview_date": "ALTER TABLE people ADD COLUMN interview_date TEXT",
         "descriptor": "ALTER TABLE people ADD COLUMN descriptor TEXT",
+        "rank": "ALTER TABLE people ADD COLUMN rank TEXT",
+        "branch_service": "ALTER TABLE people ADD COLUMN branch_service TEXT",
+        "interview_status": (
+            "ALTER TABLE people ADD COLUMN interview_status TEXT "
+            "NOT NULL DEFAULT 'completed'"
+        ),
     }
     for column, ddl in migrations.items():
         if column not in existing:
             conn.execute(ddl)
+
+
+def _migrate_documents_table(conn: sqlite3.Connection) -> None:
+    """Add `content_format` ('text' or 'pdf') to a database created
+    before PDF reference documents existed. A no-op on a fresh database,
+    where CREATE TABLE already included it. Existing rows implicitly
+    default to 'text', which is correct — every document before this
+    existed was plain text."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "content_format" not in existing:
+        conn.execute(
+            "ALTER TABLE documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'text'"
+        )
 
 
 def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
@@ -290,6 +354,10 @@ def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
 
     people_columns = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
     if {"email", "notes"} & people_columns:
+        # _migrate_people_table() runs before this, so rank/branch_service/
+        # interview_status already exist by this point on any database old
+        # enough to still have email/notes — carry them forward too, or a
+        # database this far behind would silently lose them right here.
         conn.executescript(
             """
             CREATE TABLE people_new (
@@ -301,12 +369,17 @@ def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
                 relationship TEXT,
                 interview_date TEXT,
                 descriptor TEXT,
+                rank TEXT,
+                branch_service TEXT,
+                interview_status TEXT NOT NULL DEFAULT 'completed',
                 created_at TEXT NOT NULL
             );
             INSERT INTO people_new (id, name, role, organization, seniority_level,
-                relationship, interview_date, descriptor, created_at)
+                relationship, interview_date, descriptor, rank, branch_service,
+                interview_status, created_at)
                 SELECT id, name, role, organization, seniority_level,
-                    relationship, interview_date, descriptor, created_at FROM people;
+                    relationship, interview_date, descriptor, rank, branch_service,
+                    interview_status, created_at FROM people;
             DROP TABLE people;
             ALTER TABLE people_new RENAME TO people;
             """
@@ -314,17 +387,22 @@ def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
 
     doc_columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
     if "doc_type" in doc_columns:
+        # _migrate_documents_table() runs before this, so content_format
+        # already exists by this point on any database old enough to
+        # still have doc_type — carry it forward too, same reasoning as
+        # the people_new fix above.
         conn.executescript(
             """
             CREATE TABLE documents_new (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
                 content TEXT,
+                content_format TEXT NOT NULL DEFAULT 'text',
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
-            INSERT INTO documents_new (id, title, content, is_pinned, created_at)
-                SELECT id, title, content, is_pinned, created_at FROM documents;
+            INSERT INTO documents_new (id, title, content, content_format, is_pinned, created_at)
+                SELECT id, title, content, content_format, is_pinned, created_at FROM documents;
             DROP TABLE documents;
             ALTER TABLE documents_new RENAME TO documents;
             """
@@ -347,12 +425,14 @@ def _seed_people_if_empty(conn: sqlite3.Connection) -> None:
     if count:
         return
 
-    def insert(name, role, organization, seniority_level, relationship, descriptor):
+    def insert(name, role, organization, seniority_level, relationship, descriptor,
+               rank, branch_service, interview_status):
         conn.execute(
             "INSERT INTO people (name, role, organization, seniority_level, "
-            "relationship, interview_date, descriptor, created_at) "
-            "VALUES (?, ?, ?, ?, ?, '', ?, ?)",
-            (name, role, organization, seniority_level, relationship, descriptor, _now()),
+            "relationship, interview_date, descriptor, rank, branch_service, "
+            "interview_status, created_at) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)",
+            (name, role, organization, seniority_level, relationship, descriptor,
+             rank, branch_service, interview_status, _now()),
         )
 
     insert(
@@ -362,6 +442,9 @@ def _seed_people_if_empty(conn: sqlite3.Connection) -> None:
         "NCO",
         "beneficiary",
         "Leads dismounted patrols that lose GPS in contested terrain — example seed data.",
+        "SSG / E-6",
+        "Army",
+        "completed",
     )
     insert(
         "Route Planning Officer (example)",
@@ -370,7 +453,30 @@ def _seed_people_if_empty(conn: sqlite3.Connection) -> None:
         "Company-grade officer",
         "adjacent",
         "Plans routes accounting for comms-denied navigation risk — example seed data.",
+        "Capt / O-3",
+        "Air Force",
+        "follow-up needed",
     )
+
+
+# --- ONE-TIME BACKFILL: enrich the two example seed people (Step 6) with
+# the rank/branch_service/interview_status values above, since they were
+# created before those fields existed and _seed_people_if_empty() only
+# ever runs on an empty table. Scoped to the exact two example names, and
+# only while their new fields are still blank, so this can never touch a
+# real person or overwrite an edit made since. Safe to delete once past.
+def _backfill_seed_people_new_fields(conn: sqlite3.Connection) -> None:
+    backfills = {
+        "Dismounted Squad Leader (example)": ("SSG / E-6", "Army", "completed"),
+        "Route Planning Officer (example)": ("Capt / O-3", "Air Force", "follow-up needed"),
+    }
+    for name, (rank, branch_service, interview_status) in backfills.items():
+        conn.execute(
+            "UPDATE people SET rank = ?, branch_service = ?, interview_status = ? "
+            "WHERE name = ? AND (rank IS NULL OR rank = '') "
+            "AND (branch_service IS NULL OR branch_service = '')",
+            (rank, branch_service, interview_status, name),
+        )
 
 
 def _now() -> str:
@@ -640,12 +746,14 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# People — real, working (Step 6)
+# People — real, working (Step 6; extended with rank/branch/status)
 # ---------------------------------------------------------------------------
+
+ALLOWED_INTERVIEW_STATUSES = ("scheduled", "completed", "follow-up needed")
 
 _PEOPLE_COLUMNS = (
     "id, name, role, organization, seniority_level, relationship, "
-    "interview_date, descriptor, created_at"
+    "interview_date, descriptor, rank, branch_service, interview_status, created_at"
 )
 
 
@@ -657,16 +765,21 @@ def add_person(
     relationship: str = "",
     interview_date: str = "",
     descriptor: str = "",
+    rank: str = "",
+    branch_service: str = "",
+    interview_status: str = "completed",
 ) -> int:
-    """Add a new person and return their id."""
+    """Add a new person and return their id. `interview_status` defaults
+    to "completed" — matching the normal case of confirming metadata
+    right after finishing that interview's analysis."""
     conn = get_connection()
     try:
         cur = conn.execute(
             "INSERT INTO people (name, role, organization, seniority_level, "
-            "relationship, interview_date, descriptor, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "relationship, interview_date, descriptor, rank, branch_service, "
+            "interview_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, role, organization, seniority_level, relationship, interview_date,
-             descriptor, _now()),
+             descriptor, rank, branch_service, interview_status, _now()),
         )
         conn.commit()
         return cur.lastrowid
@@ -722,6 +835,9 @@ def update_person(
     relationship: str = "",
     interview_date: str = "",
     descriptor: str = "",
+    rank: str = "",
+    branch_service: str = "",
+    interview_status: str = "completed",
 ) -> None:
     """Update a person's fields in place. Edits made on the People page
     persist via this function."""
@@ -730,9 +846,10 @@ def update_person(
         conn.execute(
             "UPDATE people SET name = ?, role = ?, organization = ?, "
             "seniority_level = ?, relationship = ?, interview_date = ?, "
-            "descriptor = ? WHERE id = ?",
+            "descriptor = ?, rank = ?, branch_service = ?, interview_status = ? "
+            "WHERE id = ?",
             (name, role, organization, seniority_level, relationship, interview_date,
-             descriptor, person_id),
+             descriptor, rank, branch_service, interview_status, person_id),
         )
         conn.commit()
     finally:
@@ -760,14 +877,35 @@ class DocumentError(Exception):
     pinned document. Pages should catch this and show st.error(str(e))."""
 
 
-def add_document(title: str, content: str, is_pinned: bool = False) -> int:
-    """Add a new document and return its id."""
+def _encode_document_content(content, content_format: str) -> str:
+    """PDF content arrives as raw bytes; base64-encode for TEXT-column
+    storage. Text content is already a str — stored as-is."""
+    if content_format == "pdf":
+        return base64.standard_b64encode(content or b"").decode("utf-8")
+    return content
+
+
+def _decode_document_row(row: dict) -> dict:
+    """Inverse of _encode_document_content — callers always get natural
+    types back: bytes for a PDF document, str for a text one."""
+    if row.get("content_format") == "pdf":
+        row["content"] = base64.standard_b64decode(row["content"] or "")
+    return row
+
+
+def add_document(
+    title: str, content, is_pinned: bool = False, content_format: str = "text"
+) -> int:
+    """Add a new document and return its id. `content` is a plain str
+    for content_format="text", or raw PDF bytes for content_format="pdf"
+    (encoded for storage automatically)."""
     conn = get_connection()
     try:
         cur = conn.execute(
-            "INSERT INTO documents (title, content, is_pinned, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (title, content, 1 if is_pinned else 0, _now()),
+            "INSERT INTO documents (title, content, content_format, is_pinned, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (title, _encode_document_content(content, content_format), content_format,
+             1 if is_pinned else 0, _now()),
         )
         conn.commit()
         return cur.lastrowid
@@ -776,14 +914,15 @@ def add_document(title: str, content: str, is_pinned: bool = False) -> int:
 
 
 def get_documents() -> list[dict]:
-    """Return all documents, pinned first, then newest first."""
+    """Return all documents, pinned first, then newest first. Each dict's
+    "content" is bytes for a PDF document, str for a text one."""
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, title, content, is_pinned, created_at FROM documents "
+            "SELECT id, title, content, content_format, is_pinned, created_at FROM documents "
             "ORDER BY is_pinned DESC, created_at DESC"
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_decode_document_row(dict(row)) for row in rows]
     finally:
         conn.close()
 
@@ -801,22 +940,26 @@ def get_document_titles(document_ids: list[int]) -> list[str]:
 
 
 def get_document(document_id: int) -> dict | None:
-    """Return one document by id, or None if it doesn't exist."""
+    """Return one document by id, or None if it doesn't exist. "content"
+    is bytes for a PDF document, str for a text one."""
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT id, title, content, is_pinned, created_at FROM documents WHERE id = ?",
+            "SELECT id, title, content, content_format, is_pinned, created_at "
+            "FROM documents WHERE id = ?",
             (document_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return _decode_document_row(dict(row)) if row else None
     finally:
         conn.close()
 
 
 def update_document(document_id: int, title: str, content: str) -> None:
-    """Update a document's title/content. REFUSES on a pinned document —
-    the Mom Test doc is viewable but not editable, since it's the graded
-    standard and sent as context on every analysis."""
+    """Update a TEXT document's title/content. REFUSES on a pinned
+    document — the Mom Test slot is viewable but not editable this way,
+    since it's the graded standard and sent as context on every analysis.
+    Not used for PDF documents — there's no text to type into a box for
+    those; see replace_document_pdf() for how a PDF's content changes."""
     conn = get_connection()
     try:
         row = conn.execute(
@@ -829,6 +972,27 @@ def update_document(document_id: int, title: str, content: str) -> None:
         conn.execute(
             "UPDATE documents SET title = ?, content = ? WHERE id = ?",
             (title, content, document_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def replace_document_pdf(document_id: int, pdf_content: bytes) -> None:
+    """Replace a document's PDF content in place (content_format is set
+    to "pdf" regardless of what it was before). Deliberately bypasses the
+    pinned-edit restriction that update_document enforces — for a PDF,
+    re-uploading a new file IS the edit; there's no text box to type
+    into. This is how the pinned Mom Test slot is first populated and
+    later replaced, and works the same way on a non-pinned document."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT id FROM documents WHERE id = ?", (document_id,)).fetchone()
+        if row is None:
+            raise DocumentError(f"No document with id {document_id}")
+        conn.execute(
+            "UPDATE documents SET content = ?, content_format = 'pdf' WHERE id = ?",
+            (_encode_document_content(pdf_content, "pdf"), document_id),
         )
         conn.commit()
     finally:

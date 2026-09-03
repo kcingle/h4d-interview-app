@@ -23,6 +23,7 @@ import storage  # noqa: F401  (importing this ensures the SQLite DB/tables exist
 from render import DEFAULT_HYPOTHESIS, build_digest, build_export_header, render_analysis
 
 RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
+INTERVIEW_STATUS_OPTIONS = list(storage.ALLOWED_INTERVIEW_STATUSES)
 
 st.set_page_config(page_title="H4D Interview App — Process Interview", page_icon="🎙️")
 
@@ -42,14 +43,30 @@ st.caption("Hardcoded for this step — hypothesis selection comes in a later st
 st.subheader("Reference documents to include")
 available_documents = storage.get_documents()
 selected_documents = []
+
 if not available_documents:
     st.caption("No reference documents yet — add some on the Documents page.")
-else:
-    for doc in available_documents:
-        label = f"📌 {doc['title']}" if doc["is_pinned"] else doc["title"]
-        include = st.checkbox(label, value=bool(doc["is_pinned"]), key=f"include_doc_{doc['id']}")
-        if include:
-            selected_documents.append(doc)
+
+# Pinned documents (the Mom Test) are a separate, mandatory category —
+# always included, first and highest, never a toggle. Everything else
+# stays an opt-in checkbox, unchecked by default.
+pinned_documents = [d for d in available_documents if d["is_pinned"]]
+toggleable_documents = [d for d in available_documents if not d["is_pinned"]]
+
+for doc in pinned_documents:
+    if doc["content"]:
+        st.success(f"📌 {doc['title']} — always included")
+        selected_documents.append(doc)
+    else:
+        st.caption(
+            f"📌 {doc['title']} — not yet uploaded. "
+            "Add it on the Documents page to include it."
+        )
+
+for doc in toggleable_documents:
+    include = st.checkbox(doc["title"], value=False, key=f"include_doc_{doc['id']}")
+    if include:
+        selected_documents.append(doc)
 
 default_title = f"Interview — {datetime.date.today().isoformat()}"
 interview_title = st.text_input("Interview title", value=default_title, key="interview_title")
@@ -167,6 +184,11 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                 m_role = st.text_input("Role / title", value=suggestion["role"])
                 m_org = st.text_input("Organization / unit", value=suggestion["organization"])
                 m_seniority = st.text_input("Seniority level", value=suggestion["seniority_level"])
+                m_rank = st.text_input("Rank", value=suggestion["rank"])
+                m_branch = st.text_input(
+                    "Branch / service", value=suggestion["branch_service"],
+                    help="E.g. Army, Air Force, Navy, Marines, Space Force, civilian/other.",
+                )
                 m_relationship = st.selectbox(
                     "Relationship to the problem",
                     RELATIONSHIP_OPTIONS,
@@ -174,6 +196,14 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                     if suggestion["relationship"] in RELATIONSHIP_OPTIONS else 0,
                 )
                 m_date = st.date_input("Interview date", value=datetime.date.today())
+                # Never AI-suggested — always defaults to "completed" and is
+                # set by hand, since you're confirming this right after
+                # finishing that interview's analysis.
+                m_status = st.selectbox(
+                    "Interview status",
+                    INTERVIEW_STATUS_OPTIONS,
+                    index=INTERVIEW_STATUS_OPTIONS.index("completed"),
+                )
                 m_descriptor = st.text_input("One-line descriptor", value=suggestion["descriptor"])
                 metadata_confirmed = st.form_submit_button("Confirm and save metadata")
 
@@ -186,6 +216,9 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                     relationship=m_relationship,
                     interview_date=m_date.isoformat(),
                     descriptor=m_descriptor.strip(),
+                    rank=m_rank.strip(),
+                    branch_service=m_branch.strip(),
+                    interview_status=m_status,
                 )
                 storage.set_interview_person(interview_id, person_id)
                 st.session_state.metadata_saved = True
