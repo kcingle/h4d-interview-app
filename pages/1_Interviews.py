@@ -1,0 +1,124 @@
+"""
+pages/1_Interviews.py — Browse saved interviews, review every past run for
+one (each run kept forever, never overwritten), and rerun it against a
+different hypothesis, which adds a brand-new run alongside the old ones.
+"""
+
+import streamlit as st
+
+import ai
+import storage
+from render import DEFAULT_HYPOTHESIS, build_digest, render_analysis
+
+st.set_page_config(page_title="H4D Interview App — Interviews", page_icon="🗂️")
+
+st.title("Interviews")
+
+interviews = storage.get_interviews()
+
+if not interviews:
+    st.write("No interviews saved yet. Process one on the **Process Interview** page first.")
+    st.stop()
+
+
+def _label(interview: dict) -> str:
+    when = interview["created_at"][:19].replace("T", " ")
+    return f"{interview['title']} — {when}"
+
+
+selected_idx = st.selectbox(
+    "Select an interview",
+    options=range(len(interviews)),
+    format_func=lambda i: _label(interviews[i]),
+    key="interviews_selectbox",
+)
+selected = interviews[selected_idx]
+
+st.subheader(selected["title"])
+st.caption(f"Saved {selected['created_at']}")
+with st.expander("Raw interview notes"):
+    st.text(selected["raw_text"])
+
+st.divider()
+st.subheader("Past runs")
+
+runs = storage.get_runs_for_interview(selected["id"])
+
+if not runs:
+    st.write("No runs yet for this interview.")
+else:
+    for i, run in enumerate(runs, start=1):
+        when = run["created_at"][:19].replace("T", " ")
+        with st.expander(f"Run {i} — hypothesis: {run['hypothesis_text']} — {when}"):
+            render_analysis(run["output"], run["hypothesis_text"], key_prefix=f"run_{run['id']}_")
+
+st.divider()
+st.subheader("Rerun this interview")
+st.caption(
+    "Runs the same two-step AI flow on this interview's saved notes against "
+    "the hypothesis below, and adds the result as a new run — earlier runs "
+    "are kept."
+)
+
+api_key = st.session_state.get("api_key", "")
+if not api_key:
+    st.warning("No Anthropic API key set yet. Enter one on the **Settings** page first.")
+
+interview_id = selected["id"]
+rerun_stage_key = f"rerun_stage_{interview_id}"
+if rerun_stage_key not in st.session_state:
+    st.session_state[rerun_stage_key] = "idle"
+
+rerun_hypothesis = st.text_input(
+    "Hypothesis to test",
+    value=DEFAULT_HYPOTHESIS,
+    key=f"rerun_hypothesis_{interview_id}",
+)
+
+if st.button(
+    "Start rerun",
+    key=f"start_rerun_{interview_id}",
+    disabled=not rerun_hypothesis.strip(),
+):
+    try:
+        with st.spinner("Asking clarifying questions..."):
+            step1 = ai.run_step1(rerun_hypothesis, selected["raw_text"], api_key)
+        st.session_state[f"rerun_questions_{interview_id}"] = step1["questions"]
+        st.session_state[f"rerun_history_{interview_id}"] = step1["history"]
+        st.session_state[f"rerun_hypothesis_used_{interview_id}"] = rerun_hypothesis
+        st.session_state[rerun_stage_key] = "awaiting_answers"
+    except ai.AIError as e:
+        st.error(str(e))
+
+if st.session_state[rerun_stage_key] == "awaiting_answers":
+    rerun_questions = st.session_state.get(f"rerun_questions_{interview_id}", [])
+
+    if not rerun_questions:
+        st.write("The AI had no clarifying questions for this interview.")
+
+    with st.form(f"rerun_answers_form_{interview_id}"):
+        rerun_answers = [
+            st.text_area(f"Q{i + 1}. {q}", key=f"rerun_answer_{interview_id}_{i}")
+            for i, q in enumerate(rerun_questions)
+        ]
+        rerun_submitted = st.form_submit_button("Continue → Run full analysis")
+
+    if rerun_submitted:
+        try:
+            with st.spinner("Running the full analysis..."):
+                rerun_history = st.session_state[f"rerun_history_{interview_id}"]
+                analysis = ai.run_step2(rerun_history, rerun_questions, rerun_answers, api_key)
+            hypothesis_used = st.session_state[f"rerun_hypothesis_used_{interview_id}"]
+            digest = build_digest(hypothesis_used, analysis)
+            # Step 5: no document checklist on this rerun control yet
+            # (only the Process Interview page has one) — record an empty
+            # document set rather than omitting provenance entirely.
+            new_run_id = storage.save_run(
+                interview_id, hypothesis_used, rerun_questions, rerun_answers, analysis, digest,
+                document_ids=[],
+            )
+            st.session_state[rerun_stage_key] = "idle"
+            st.success(f"Saved as run #{new_run_id}. Earlier runs for this interview are unchanged.")
+            st.rerun()
+        except ai.AIError as e:
+            st.error(str(e))
