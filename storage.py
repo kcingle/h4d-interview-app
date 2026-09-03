@@ -1,57 +1,114 @@
 """
 storage.py — All persistence for the app lives here, behind simple named
 functions (save_interview, get_interviews, etc.). Pages should never touch
-SQLite directly; if we later swap to a hosted database, only this file
-should need to change.
+the database directly.
 
-Through Step 6: interviews, runs (with rerun history + document/hypothesis
-provenance), the hypothesis tree, documents (incl. the pinned Mom Test
-doc), and people/metadata are all fully real. Every schema change so far
-has been an additive migration — see the `_migrate_*` functions below.
+CLOUD MIGRATION: this is the Postgres-backed version of storage.py (on the
+`cloud-migration` branch), replacing the original SQLite implementation so
+a shared, hosted deployment can support concurrent multi-user writes and
+survive container restarts (SQLite's local file doesn't). Every public
+function below keeps the EXACT same name, arguments, and return shape as
+the SQLite version — no page, ai.py, or render.py needed to change at all.
+What changed is entirely internal: SQL dialect (?, -> %s, SERIAL instead
+of AUTOINCREMENT, RETURNING id instead of cur.lastrowid, a small
+connection pool instead of a fresh SQLite file handle per call), and the
+historical SQLite `_migrate_*`/`_cleanup_*` functions are gone — Postgres
+starts directly from the current, already-cleaned final schema shape,
+since we're migrating existing *data* (via migrate_to_postgres.py), not
+replaying SQLite's own past ALTER TABLE history.
+
+Connection string resolution: reads DATABASE_URL from Streamlit secrets
+when running inside a Streamlit app, falling back to the DATABASE_URL
+environment variable otherwise (e.g. for the standalone migration script,
+or any local non-Streamlit testing).
 """
 
 import base64
 import json
+import os
 import re
-import sqlite3
-from pathlib import Path
 from datetime import datetime, timezone
 
-DB_PATH = Path(__file__).parent / "h4d_app.db"
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
 
 
-def get_connection() -> sqlite3.Connection:
-    """Open a new SQLite connection with foreign keys enabled and rows
-    returned as dict-like objects (sqlite3.Row)."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _get_database_url() -> str:
+    """Resolve the Postgres connection string: Streamlit secrets first
+    (normal app usage), then the DATABASE_URL environment variable
+    (standalone scripts, e.g. migrate_to_postgres.py, or local testing
+    outside Streamlit)."""
+    try:
+        import streamlit as st
+        if "DATABASE_URL" in st.secrets:
+            return st.secrets["DATABASE_URL"]
+    except Exception:
+        pass
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "No database connection configured. Set DATABASE_URL in "
+            ".streamlit/secrets.toml (local) or the app's Streamlit Cloud "
+            "secrets (deployed), or as an environment variable (scripts)."
+        )
+    return url
+
+
+_POOL: psycopg2.pool.ThreadedConnectionPool | None = None
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    """A small, lazily-created connection pool — reused across calls so
+    we're not paying a fresh TCP+TLS handshake to the remote database on
+    every single function call, the way a fresh local SQLite file handle
+    was effectively free to reopen."""
+    global _POOL
+    if _POOL is None:
+        _POOL = psycopg2.pool.ThreadedConnectionPool(1, 10, _get_database_url())
+    return _POOL
+
+
+def get_connection():
+    """Borrow a pooled connection. Callers MUST release it via
+    release_connection() in a `finally` block (mirroring the old
+    get_connection()/conn.close() shape, just backed by a pool instead of
+    a fresh file handle)."""
+    return _get_pool().getconn()
+
+
+def release_connection(conn) -> None:
+    _get_pool().putconn(conn)
+
+
+def _dict_cursor(conn):
+    """A cursor whose rows behave like dicts (row["col"]), matching the
+    old sqlite3.Row + dict(row) pattern used everywhere in this file."""
+    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def init_db() -> None:
     """Create all tables if they don't exist yet. Safe to call repeatedly.
+    This is the CURRENT (post schema-cleanup) shape — no historical
+    ALTER TABLE migrations to replay on Postgres; existing SQLite data
+    arrives here via the separate migrate_to_postgres.py script instead.
 
       - interviews: raw interview text/notes, optionally linked to a person.
-      - people: interviewee metadata (Step 6), linked via interviews.person_id.
+      - people: interviewee metadata, linked via interviews.person_id.
       - hypotheses: a branching tree (label like 1, 1a, 1b) with an
-        active/dormant state (Step 4).
+        active/dormant state.
       - runs: one row per AI processing pass over an interview, so
-        reruns against different hypotheses never overwrite history (Step 3);
-        also records which reference documents were used (Step 5).
-      - documents: reference docs, incl. a pinned Mom Test doc (Step 5).
-
-    This is the CURRENT (post schema-cleanup) shape, used as-is for a
-    brand-new database. An existing database created before the cleanup
-    is brought to this same shape by _cleanup_dead_schema_v1() below —
-    see that function for what was removed and why.
+        reruns against different hypotheses never overwrite history;
+        also records which reference documents were used.
+      - documents: reference docs, incl. a pinned Mom Test doc.
     """
     conn = get_connection()
     try:
-        conn.executescript(
+        cur = conn.cursor()
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS people (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 role TEXT,
                 organization TEXT,
@@ -66,39 +123,37 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS interviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
                 raw_text TEXT NOT NULL,
                 notes TEXT,
-                person_id INTEGER,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (person_id) REFERENCES people (id)
+                person_id INTEGER REFERENCES people (id),
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS hypotheses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 statement TEXT NOT NULL,
                 label TEXT,
                 state TEXT NOT NULL DEFAULT 'active',
-                parent_id INTEGER,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (parent_id) REFERENCES hypotheses (id)
+                parent_id INTEGER REFERENCES hypotheses (id),
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                interview_id INTEGER NOT NULL,
+                id SERIAL PRIMARY KEY,
+                interview_id INTEGER NOT NULL REFERENCES interviews (id),
                 hypothesis_text TEXT NOT NULL DEFAULT '',
                 questions_json TEXT,
                 answers_json TEXT,
                 output_json TEXT,
                 digest_json TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (interview_id) REFERENCES interviews (id)
+                document_ids_json TEXT,
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
                 content TEXT,
                 content_format TEXT NOT NULL DEFAULT 'text',
@@ -107,71 +162,31 @@ def init_db() -> None:
             );
             """
         )
-        _migrate_runs_table(conn)
-        _migrate_hypotheses_table(conn)
-        _migrate_people_table(conn)
-        _migrate_documents_table(conn)
-        _cleanup_dead_schema_v1(conn)
+        conn.commit()
         _seed_hypotheses_if_empty(conn)
         _seed_mom_test_document_if_missing(conn)
-        _replace_mom_test_text_with_pdf_slot(conn)
         _seed_people_if_empty(conn)
-        _backfill_seed_people_new_fields(conn)
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
-def _migrate_runs_table(conn: sqlite3.Connection) -> None:
-    """Add Step 3's new `runs` columns to a database created before Step 3
-    existed. A no-op on a fresh database, where CREATE TABLE already
-    included them. Never touches existing rows' other data."""
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
-    migrations = {
-        "hypothesis_text": "ALTER TABLE runs ADD COLUMN hypothesis_text TEXT NOT NULL DEFAULT ''",
-        "questions_json": "ALTER TABLE runs ADD COLUMN questions_json TEXT",
-        "answers_json": "ALTER TABLE runs ADD COLUMN answers_json TEXT",
-        "digest_json": "ALTER TABLE runs ADD COLUMN digest_json TEXT",
-        "document_ids_json": "ALTER TABLE runs ADD COLUMN document_ids_json TEXT",
-    }
-    for column, ddl in migrations.items():
-        if column not in existing:
-            conn.execute(ddl)
-
-
-def _migrate_hypotheses_table(conn: sqlite3.Connection) -> None:
-    """Add Step 4's new `hypotheses` columns (`label`, `state`) to a
-    database created before Step 4 existed. A no-op on a fresh database,
-    where CREATE TABLE already included them. (The old `family`,
-    `version`, and `is_active_for_testing` columns this docstring used to
-    mention here were removed entirely by the schema cleanup — see
-    _cleanup_dead_schema_v1 below.)"""
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(hypotheses)")}
-    migrations = {
-        "label": "ALTER TABLE hypotheses ADD COLUMN label TEXT",
-        "state": "ALTER TABLE hypotheses ADD COLUMN state TEXT NOT NULL DEFAULT 'active'",
-    }
-    for column, ddl in migrations.items():
-        if column not in existing:
-            conn.execute(ddl)
-
-
-# --- SEED DATA (Step 4 demo tree) -------------------------------------------
-# Delete this function and its call above to remove the seed tree entirely.
-# It only ever fires when the hypotheses table is completely empty, and
-# never overwrites or touches existing hypotheses.
-def _seed_hypotheses_if_empty(conn: sqlite3.Connection) -> None:
-    count = conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0]
-    if count:
+# --- SEED DATA (demo hypothesis tree) ---------------------------------------
+# Only fires when the hypotheses table is completely empty; never
+# overwrites existing hypotheses.
+def _seed_hypotheses_if_empty(conn) -> None:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM hypotheses")
+    if cur.fetchone()[0]:
         return
 
     def insert(parent_id, label, text, state):
-        conn.execute(
+        cur.execute(
             "INSERT INTO hypotheses (statement, label, state, parent_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
             (text, label, state, parent_id, _now()),
         )
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return cur.fetchone()[0]
 
     root1 = insert(
         None, "1",
@@ -216,222 +231,37 @@ def _seed_hypotheses_if_empty(conn: sqlite3.Connection) -> None:
     )
 
 
-# --- SEED DATA (Step 5 pinned Mom Test doc) ---------------------------------
-# Only fires when no pinned document exists yet; never overwrites existing
-# documents. The pinned slot is now an empty PDF placeholder — upload the
-# actual book via the Documents page. _MOM_TEST_SEED_CONTENT is kept only
-# as the known original text, so _replace_mom_test_text_with_pdf_slot()
-# below can recognize (and convert) a database seeded before this change.
-_MOM_TEST_SEED_CONTENT = """\
-- Ground every question in the interviewee's actual life and past behavior — not your idea, and not hypotheticals.
-- Ask about specific things that already happened ("What's the last time this came up, and what did you do?"), never "Would you..." or "Do you think you'd..."
-- Don't pitch, explain, or describe your solution during a discovery interview — you're gathering evidence, not selling.
-- Push for specifics: exact dates, tools used, time lost, money spent, workarounds tried. Vague or generic answers aren't evidence.
-- Treat enthusiasm and compliments as noise. Look for real commitments — money, time, an introduction, a follow-up meeting — as the actual signal.
-- Every claim in an analysis should trace back to something the interviewee actually said or did, never to what they said they would do.
-"""
-
+# --- SEED DATA (pinned Mom Test doc) ----------------------------------------
 MOM_TEST_TITLE = "The Mom Test (PDF)"
 
 
-def _seed_mom_test_document_if_missing(conn: sqlite3.Connection) -> None:
-    count = conn.execute("SELECT COUNT(*) FROM documents WHERE is_pinned = 1").fetchone()[0]
-    if count:
+def _seed_mom_test_document_if_missing(conn) -> None:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM documents WHERE is_pinned = 1")
+    if cur.fetchone()[0]:
         return
-    conn.execute(
+    cur.execute(
         "INSERT INTO documents (title, content, content_format, is_pinned, created_at) "
-        "VALUES (?, '', 'pdf', 1, ?)",
+        "VALUES (%s, '', 'pdf', 1, %s)",
         (MOM_TEST_TITLE, _now()),
     )
 
 
-def _replace_mom_test_text_with_pdf_slot(conn: sqlite3.Connection) -> None:
-    """One-time replace of the original seeded Mom Test TEXT document
-    with an empty, pinned PDF slot to upload the real book into. Only
-    touches a row whose content still exactly matches the known original
-    auto-generated text — since update_document already refuses to edit
-    pinned documents, in practice this can only ever match an untouched
-    original seed, never something you've since changed. Idempotent:
-    once converted, content is empty and no longer matches, so this is a
-    no-op on every later call. A fresh database never has this row in
-    the first place (seeded directly as an empty PDF slot above), so
-    this is also a no-op there.
-    """
-    rows = conn.execute(
-        "SELECT id FROM documents WHERE is_pinned = 1 AND content = ?",
-        (_MOM_TEST_SEED_CONTENT,),
-    ).fetchall()
-    for row in rows:
-        conn.execute(
-            "UPDATE documents SET title = ?, content = '', content_format = 'pdf' WHERE id = ?",
-            (MOM_TEST_TITLE, row["id"]),
-        )
-
-
-def _migrate_people_table(conn: sqlite3.Connection) -> None:
-    """Add Step 6's new `people` columns to a database created before Step
-    6 existed. A no-op on a fresh database. (The old `email`/`notes`
-    columns this docstring used to mention here were removed entirely by
-    the schema cleanup — see _cleanup_dead_schema_v1 below.)
-
-    Also adds the People-metadata-extension columns (`rank`,
-    `branch_service`, `interview_status`) for a database created before
-    that extension existed. `interview_status`'s DEFAULT 'completed'
-    backfills every existing row automatically the moment the column is
-    added — that's the "default completed for existing records" behavior,
-    with no separate UPDATE needed.
-    """
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
-    migrations = {
-        "seniority_level": "ALTER TABLE people ADD COLUMN seniority_level TEXT",
-        "relationship": "ALTER TABLE people ADD COLUMN relationship TEXT",
-        "interview_date": "ALTER TABLE people ADD COLUMN interview_date TEXT",
-        "descriptor": "ALTER TABLE people ADD COLUMN descriptor TEXT",
-        "rank": "ALTER TABLE people ADD COLUMN rank TEXT",
-        "branch_service": "ALTER TABLE people ADD COLUMN branch_service TEXT",
-        "interview_status": (
-            "ALTER TABLE people ADD COLUMN interview_status TEXT "
-            "NOT NULL DEFAULT 'completed'"
-        ),
-    }
-    for column, ddl in migrations.items():
-        if column not in existing:
-            conn.execute(ddl)
-
-
-def _migrate_documents_table(conn: sqlite3.Connection) -> None:
-    """Add `content_format` ('text' or 'pdf') to a database created
-    before PDF reference documents existed. A no-op on a fresh database,
-    where CREATE TABLE already included it. Existing rows implicitly
-    default to 'text', which is correct — every document before this
-    existed was plain text."""
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
-    if "content_format" not in existing:
-        conn.execute(
-            "ALTER TABLE documents ADD COLUMN content_format TEXT NOT NULL DEFAULT 'text'"
-        )
-
-
-def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
-    """One-time removal of columns/tables that were part of an earlier
-    step's provisional schema but were never read or written by any code:
-    hypotheses.family/version/is_active_for_testing, people.email/notes,
-    documents.doc_type, and the run_hypotheses table (never populated —
-    no code ever inserted into, selected from, or joined against it).
-
-    Idempotent: each check looks for the dead column/table's presence
-    before acting, so this is a no-op on a database that's already been
-    cleaned, or one created fresh after this cleanup existed (its CREATE
-    TABLE statements above never included these in the first place).
-
-    SQLite (as used here, via Python's bundled sqlite3 module) has no
-    DROP COLUMN, so each affected table is recreated with the trimmed
-    column set: every surviving row is copied across by explicit column
-    name (never SELECT *, never by position), the old table is dropped,
-    and the new one is renamed into place. `id` is always carried
-    forward unchanged, so parent_id/person_id references elsewhere stay
-    valid, and SQLite's ALTER TABLE RENAME automatically updates other
-    tables' FOREIGN KEY clauses that pointed to the old table name.
-    """
-    hyp_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hypotheses)")}
-    if {"family", "version", "is_active_for_testing"} & hyp_columns:
-        conn.executescript(
-            """
-            CREATE TABLE hypotheses_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                statement TEXT NOT NULL,
-                label TEXT,
-                state TEXT NOT NULL DEFAULT 'active',
-                parent_id INTEGER,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (parent_id) REFERENCES hypotheses_new (id)
-            );
-            INSERT INTO hypotheses_new (id, statement, label, state, parent_id, created_at)
-                SELECT id, statement, label, state, parent_id, created_at FROM hypotheses;
-            DROP TABLE hypotheses;
-            ALTER TABLE hypotheses_new RENAME TO hypotheses;
-            """
-        )
-
-    people_columns = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
-    if {"email", "notes"} & people_columns:
-        # _migrate_people_table() runs before this, so rank/branch_service/
-        # interview_status already exist by this point on any database old
-        # enough to still have email/notes — carry them forward too, or a
-        # database this far behind would silently lose them right here.
-        conn.executescript(
-            """
-            CREATE TABLE people_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                role TEXT,
-                organization TEXT,
-                seniority_level TEXT,
-                relationship TEXT,
-                interview_date TEXT,
-                descriptor TEXT,
-                rank TEXT,
-                branch_service TEXT,
-                interview_status TEXT NOT NULL DEFAULT 'completed',
-                created_at TEXT NOT NULL
-            );
-            INSERT INTO people_new (id, name, role, organization, seniority_level,
-                relationship, interview_date, descriptor, rank, branch_service,
-                interview_status, created_at)
-                SELECT id, name, role, organization, seniority_level,
-                    relationship, interview_date, descriptor, rank, branch_service,
-                    interview_status, created_at FROM people;
-            DROP TABLE people;
-            ALTER TABLE people_new RENAME TO people;
-            """
-        )
-
-    doc_columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
-    if "doc_type" in doc_columns:
-        # _migrate_documents_table() runs before this, so content_format
-        # already exists by this point on any database old enough to
-        # still have doc_type — carry it forward too, same reasoning as
-        # the people_new fix above.
-        conn.executescript(
-            """
-            CREATE TABLE documents_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                content TEXT,
-                content_format TEXT NOT NULL DEFAULT 'text',
-                is_pinned INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
-            );
-            INSERT INTO documents_new (id, title, content, content_format, is_pinned, created_at)
-                SELECT id, title, content, content_format, is_pinned, created_at FROM documents;
-            DROP TABLE documents;
-            ALTER TABLE documents_new RENAME TO documents;
-            """
-        )
-
-    run_hyp_exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_hypotheses'"
-    ).fetchone()
-    if run_hyp_exists:
-        conn.execute("DROP TABLE run_hypotheses")
-
-
-# --- SEED DATA (Step 6 demo people) -----------------------------------------
+# --- SEED DATA (demo people) -------------------------------------------------
 # Only fires when the people table is completely empty; never overwrites
-# existing people. These are standalone example rows, NOT linked to any
-# real interview (their names are tagged "(example)" so they're obvious),
-# thematically matching the Step 4 seed hypothesis tree's scenario.
-def _seed_people_if_empty(conn: sqlite3.Connection) -> None:
-    count = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
-    if count:
+# existing people. Standalone example rows, not linked to any interview.
+def _seed_people_if_empty(conn) -> None:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM people")
+    if cur.fetchone()[0]:
         return
 
     def insert(name, role, organization, seniority_level, relationship, descriptor,
                rank, branch_service, interview_status):
-        conn.execute(
+        cur.execute(
             "INSERT INTO people (name, role, organization, seniority_level, "
             "relationship, interview_date, descriptor, rank, branch_service, "
-            "interview_status, created_at) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)",
+            "interview_status, created_at) VALUES (%s, %s, %s, %s, %s, '', %s, %s, %s, %s, %s)",
             (name, role, organization, seniority_level, relationship, descriptor,
              rank, branch_service, interview_status, _now()),
         )
@@ -460,107 +290,94 @@ def _seed_people_if_empty(conn: sqlite3.Connection) -> None:
     )
 
 
-# --- ONE-TIME BACKFILL: enrich the two example seed people (Step 6) with
-# the rank/branch_service/interview_status values above, since they were
-# created before those fields existed and _seed_people_if_empty() only
-# ever runs on an empty table. Scoped to the exact two example names, and
-# only while their new fields are still blank, so this can never touch a
-# real person or overwrite an edit made since. Safe to delete once past.
-def _backfill_seed_people_new_fields(conn: sqlite3.Connection) -> None:
-    backfills = {
-        "Dismounted Squad Leader (example)": ("SSG / E-6", "Army", "completed"),
-        "Route Planning Officer (example)": ("Capt / O-3", "Air Force", "follow-up needed"),
-    }
-    for name, (rank, branch_service, interview_status) in backfills.items():
-        conn.execute(
-            "UPDATE people SET rank = ?, branch_service = ?, interview_status = ? "
-            "WHERE name = ? AND (rank IS NULL OR rank = '') "
-            "AND (branch_service IS NULL OR branch_service = '')",
-            (rank, branch_service, interview_status, name),
-        )
-
-
 def _now() -> str:
     """ISO-8601 UTC timestamp used for every created_at column."""
     return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
-# Interviews — real, working (Step 1)
+# Interviews
 # ---------------------------------------------------------------------------
 
 def save_interview(title: str, raw_text: str, notes: str = "") -> int:
     """Save a new interview and return its new row id."""
     conn = get_connection()
     try:
-        cur = conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO interviews (title, raw_text, notes, created_at) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s) RETURNING id",
             (title, raw_text, notes, _now()),
         )
+        new_id = cur.fetchone()[0]
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_interviews() -> list[dict]:
     """Return all interviews, newest first, as a list of plain dicts."""
     conn = get_connection()
     try:
-        rows = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             "SELECT id, title, raw_text, notes, person_id, created_at "
             "FROM interviews ORDER BY created_at DESC"
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
+        return [dict(row) for row in cur.fetchall()]
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_interview(interview_id: int) -> dict | None:
     """Return one interview by id, or None if it doesn't exist."""
     conn = get_connection()
     try:
-        row = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             "SELECT id, title, raw_text, notes, person_id, created_at "
-            "FROM interviews WHERE id = ?",
+            "FROM interviews WHERE id = %s",
             (interview_id,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         return dict(row) if row else None
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_person_for_interview(interview_id: int) -> dict | None:
     """Return the person linked to this interview (via
-    interviews.person_id), or None if it has no metadata yet. Used by
-    Step 7 export to show the interviewee on a run's export header."""
+    interviews.person_id), or None if it has no metadata yet."""
     conn = get_connection()
     try:
-        row = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             f"SELECT {_PEOPLE_COLUMNS} FROM people WHERE id = "
-            "(SELECT person_id FROM interviews WHERE id = ?)",
+            "(SELECT person_id FROM interviews WHERE id = %s)",
             (interview_id,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         return dict(row) if row else None
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 # ---------------------------------------------------------------------------
-# Hypotheses — real, working (Step 4)
+# Hypotheses
 # ---------------------------------------------------------------------------
 
 ALLOWED_HYPOTHESIS_STATES = ("active", "dormant")
 
 
-def _next_root_label(conn: sqlite3.Connection) -> str:
+def _next_root_label(conn) -> str:
     """Next unused integer label among root (family-head) nodes."""
-    rows = conn.execute("SELECT label FROM hypotheses WHERE parent_id IS NULL").fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT label FROM hypotheses WHERE parent_id IS NULL")
     used = set()
-    for row in rows:
+    for (label,) in cur.fetchall():
         try:
-            used.add(int(row["label"]))
+            used.add(int(label))
         except (TypeError, ValueError):
             pass
     n = 1
@@ -569,13 +386,14 @@ def _next_root_label(conn: sqlite3.Connection) -> str:
     return str(n)
 
 
-def _next_child_label(conn: sqlite3.Connection, parent_id: int, parent_label: str) -> str:
+def _next_child_label(conn, parent_id: int, parent_label: str) -> str:
     """Next unused single-letter suffix among one parent's direct children
     (falls back to two letters in the unlikely event of >26 siblings)."""
-    rows = conn.execute("SELECT label FROM hypotheses WHERE parent_id = ?", (parent_id,)).fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT label FROM hypotheses WHERE parent_id = %s", (parent_id,))
     used_suffixes = set()
-    for row in rows:
-        lbl = row["label"] or ""
+    for (lbl,) in cur.fetchall():
+        lbl = lbl or ""
         if lbl.startswith(parent_label):
             suffix = lbl[len(parent_label):]
             if suffix:
@@ -603,25 +421,26 @@ def add_hypothesis(parent_id: int | None, text: str) -> int:
     """
     conn = get_connection()
     try:
+        cur = conn.cursor()
         if parent_id is None:
             label = _next_root_label(conn)
         else:
-            parent = conn.execute(
-                "SELECT label FROM hypotheses WHERE id = ?", (parent_id,)
-            ).fetchone()
+            cur.execute("SELECT label FROM hypotheses WHERE id = %s", (parent_id,))
+            parent = cur.fetchone()
             if parent is None:
                 raise ValueError(f"No hypothesis with id {parent_id}")
-            label = _next_child_label(conn, parent_id, parent["label"])
+            label = _next_child_label(conn, parent_id, parent[0])
 
-        cur = conn.execute(
+        cur.execute(
             "INSERT INTO hypotheses (statement, label, state, parent_id, created_at) "
-            "VALUES (?, ?, 'active', ?, ?)",
+            "VALUES (%s, %s, 'active', %s, %s) RETURNING id",
             (text, label, parent_id, _now()),
         )
+        new_id = cur.fetchone()[0]
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_hypothesis_tree() -> list[dict]:
@@ -630,10 +449,12 @@ def get_hypothesis_tree() -> list[dict]:
     sorted by label at every level."""
     conn = get_connection()
     try:
-        rows = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             "SELECT id, label, statement AS text, state, parent_id, created_at "
             "FROM hypotheses ORDER BY label"
-        ).fetchall()
+        )
+        rows = cur.fetchall()
         nodes = {row["id"]: {**dict(row), "children": []} for row in rows}
         roots = []
         for node in nodes.values():
@@ -645,7 +466,7 @@ def get_hypothesis_tree() -> list[dict]:
                 roots.append(node)  # true root, or an orphan as a safety net
         return roots
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def set_hypothesis_state(hypothesis_id: int, state: str) -> None:
@@ -655,10 +476,11 @@ def set_hypothesis_state(hypothesis_id: int, state: str) -> None:
         raise ValueError(f"state must be one of {ALLOWED_HYPOTHESIS_STATES}, got {state!r}")
     conn = get_connection()
     try:
-        conn.execute("UPDATE hypotheses SET state = ? WHERE id = ?", (state, hypothesis_id))
+        cur = conn.cursor()
+        cur.execute("UPDATE hypotheses SET state = %s WHERE id = %s", (state, hypothesis_id))
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def edit_hypothesis_text(hypothesis_id: int, text: str) -> None:
@@ -666,10 +488,11 @@ def edit_hypothesis_text(hypothesis_id: int, text: str) -> None:
     are left untouched."""
     conn = get_connection()
     try:
-        conn.execute("UPDATE hypotheses SET statement = ? WHERE id = ?", (text, hypothesis_id))
+        cur = conn.cursor()
+        cur.execute("UPDATE hypotheses SET statement = %s WHERE id = %s", (text, hypothesis_id))
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def _normalize_hypothesis_text(text: str) -> str:
@@ -767,10 +590,10 @@ def get_all_topic_tags() -> list[str]:
 def search_digests(query: str) -> list[dict]:
     """Keyword/tag search across every interview's digest(s) — plain
     substring matching over digest text and quotes, no semantic search,
-    no vector DB (a possible future upgrade, not built here). An item
-    matches if `query` appears in its own label/claim text, its quote, OR
-    the interview's topic tags include it. claims_to_verify entries are
-    excluded — they carry no verbatim quote, and every result here must.
+    no vector DB. An item matches if `query` appears in its own
+    label/claim text, its quote, OR the interview's topic tags include
+    it. claims_to_verify entries are excluded — they carry no verbatim
+    quote, and every result here must.
 
     Returns one entry per matching interview (merged across any reruns),
     each with its own real, de-duplicated quotes — never an invented or
@@ -886,7 +709,7 @@ def compare_interviews_on_topic(interview_ids: list[int], topic: str) -> list[di
 
 
 # ---------------------------------------------------------------------------
-# Runs — real, working (Step 3)
+# Runs
 # ---------------------------------------------------------------------------
 
 def save_run(
@@ -904,16 +727,17 @@ def save_run(
     earlier run. The hypothesis text is stored verbatim on the run itself
     (not just referenced), so an old run stays meaningful even if the
     hypothesis wording is edited later. `document_ids` records which
-    reference documents (Step 5) were included as context for this run —
+    reference documents were included as context for this run —
     provenance for defending which context produced a given analysis.
     """
     conn = get_connection()
     try:
-        cur = conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO runs "
             "(interview_id, hypothesis_text, questions_json, answers_json, "
             "output_json, digest_json, document_ids_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 interview_id,
                 hypothesis_text,
@@ -925,28 +749,30 @@ def save_run(
                 _now(),
             ),
         )
+        new_id = cur.fetchone()[0]
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_runs_for_interview(interview_id: int) -> list[dict]:
     """Return every run for one interview, oldest first (so "Run 1", "Run 2"
     labels line up with processing order), with the JSON columns already
     parsed back into Python objects (questions/answers/output/digest/
-    document_ids). Runs saved before Step 5 have no document_ids_json —
-    those load fine with document_ids == []."""
+    document_ids). Runs saved before document provenance existed have no
+    document_ids_json — those load fine with document_ids == []."""
     conn = get_connection()
     try:
-        rows = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             "SELECT id, interview_id, hypothesis_text, questions_json, "
             "answers_json, output_json, digest_json, document_ids_json, created_at "
-            "FROM runs WHERE interview_id = ? ORDER BY created_at ASC",
+            "FROM runs WHERE interview_id = %s ORDER BY created_at ASC",
             (interview_id,),
-        ).fetchall()
+        )
         runs = []
-        for row in rows:
+        for row in cur.fetchall():
             d = dict(row)
             d["questions"] = json.loads(d.pop("questions_json") or "[]")
             d["answers"] = json.loads(d.pop("answers_json") or "[]")
@@ -956,27 +782,27 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
             runs.append(d)
         return runs
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def update_run_digest(run_id: int, digest: dict) -> None:
-    """Replace a run's stored digest in place. No schema change needed —
-    digest_json has always been a flexible JSON column. Used to backfill
-    a run saved before the rich digest existed, to refresh one once
-    interviewee metadata is confirmed shortly after a run is first saved,
-    or just to regenerate on demand."""
+    """Replace a run's stored digest in place. Used to backfill a run
+    saved before the rich digest existed, to refresh one once interviewee
+    metadata is confirmed shortly after a run is first saved, or just to
+    regenerate on demand."""
     conn = get_connection()
     try:
-        conn.execute(
-            "UPDATE runs SET digest_json = ? WHERE id = ?", (json.dumps(digest), run_id)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE runs SET digest_json = %s WHERE id = %s", (json.dumps(digest), run_id)
         )
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 # ---------------------------------------------------------------------------
-# People — real, working (Step 6; extended with rank/branch/status)
+# People
 # ---------------------------------------------------------------------------
 
 ALLOWED_INTERVIEW_STATUSES = ("scheduled", "completed", "follow-up needed")
@@ -1004,29 +830,33 @@ def add_person(
     right after finishing that interview's analysis."""
     conn = get_connection()
     try:
-        cur = conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO people (name, role, organization, seniority_level, "
             "relationship, interview_date, descriptor, rank, branch_service, "
-            "interview_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "interview_status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id",
             (name, role, organization, seniority_level, relationship, interview_date,
              descriptor, rank, branch_service, interview_status, _now()),
         )
+        new_id = cur.fetchone()[0]
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
-        conn.close()
+        release_connection(conn)
 
 
-def _attach_interviews(conn: sqlite3.Connection, person: dict) -> dict:
+def _attach_interviews(conn, person: dict) -> dict:
     """Attach the list of interviews linked to this person (via
     interviews.person_id), so the People page can show "their interview(s)
     and its runs" without a separate query per caller."""
-    rows = conn.execute(
-        "SELECT id, title, created_at FROM interviews WHERE person_id = ? "
+    cur = _dict_cursor(conn)
+    cur.execute(
+        "SELECT id, title, created_at FROM interviews WHERE person_id = %s "
         "ORDER BY created_at ASC",
         (person["id"],),
-    ).fetchall()
-    person["interviews"] = [dict(row) for row in rows]
+    )
+    person["interviews"] = [dict(row) for row in cur.fetchall()]
     return person
 
 
@@ -1035,12 +865,11 @@ def get_people() -> list[dict]:
     interview(s) attached as an "interviews" list."""
     conn = get_connection()
     try:
-        rows = conn.execute(
-            f"SELECT {_PEOPLE_COLUMNS} FROM people ORDER BY created_at DESC"
-        ).fetchall()
-        return [_attach_interviews(conn, dict(row)) for row in rows]
+        cur = _dict_cursor(conn)
+        cur.execute(f"SELECT {_PEOPLE_COLUMNS} FROM people ORDER BY created_at DESC")
+        return [_attach_interviews(conn, dict(row)) for row in cur.fetchall()]
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_person(person_id: int) -> dict | None:
@@ -1048,12 +877,12 @@ def get_person(person_id: int) -> dict | None:
     None if they don't exist."""
     conn = get_connection()
     try:
-        row = conn.execute(
-            f"SELECT {_PEOPLE_COLUMNS} FROM people WHERE id = ?", (person_id,)
-        ).fetchone()
+        cur = _dict_cursor(conn)
+        cur.execute(f"SELECT {_PEOPLE_COLUMNS} FROM people WHERE id = %s", (person_id,))
+        row = cur.fetchone()
         return _attach_interviews(conn, dict(row)) if row else None
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def update_person(
@@ -1073,33 +902,35 @@ def update_person(
     persist via this function."""
     conn = get_connection()
     try:
-        conn.execute(
-            "UPDATE people SET name = ?, role = ?, organization = ?, "
-            "seniority_level = ?, relationship = ?, interview_date = ?, "
-            "descriptor = ?, rank = ?, branch_service = ?, interview_status = ? "
-            "WHERE id = ?",
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE people SET name = %s, role = %s, organization = %s, "
+            "seniority_level = %s, relationship = %s, interview_date = %s, "
+            "descriptor = %s, rank = %s, branch_service = %s, interview_status = %s "
+            "WHERE id = %s",
             (name, role, organization, seniority_level, relationship, interview_date,
              descriptor, rank, branch_service, interview_status, person_id),
         )
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def set_interview_person(interview_id: int, person_id: int) -> None:
     """Link an interview to a person (sets interviews.person_id)."""
     conn = get_connection()
     try:
-        conn.execute(
-            "UPDATE interviews SET person_id = ? WHERE id = ?", (person_id, interview_id)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE interviews SET person_id = %s WHERE id = %s", (person_id, interview_id)
         )
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 # ---------------------------------------------------------------------------
-# Documents — real, working (Step 5)
+# Documents
 # ---------------------------------------------------------------------------
 
 class DocumentError(Exception):
@@ -1131,16 +962,18 @@ def add_document(
     (encoded for storage automatically)."""
     conn = get_connection()
     try:
-        cur = conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO documents (title, content, content_format, is_pinned, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
             (title, _encode_document_content(content, content_format), content_format,
              1 if is_pinned else 0, _now()),
         )
+        new_id = cur.fetchone()[0]
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_documents() -> list[dict]:
@@ -1148,19 +981,20 @@ def get_documents() -> list[dict]:
     "content" is bytes for a PDF document, str for a text one."""
     conn = get_connection()
     try:
-        rows = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             "SELECT id, title, content, content_format, is_pinned, created_at FROM documents "
             "ORDER BY is_pinned DESC, created_at DESC"
-        ).fetchall()
-        return [_decode_document_row(dict(row)) for row in rows]
+        )
+        return [_decode_document_row(dict(row)) for row in cur.fetchall()]
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def get_document_titles(document_ids: list[int]) -> list[str]:
-    """Resolve a run's stored document_ids to titles, for the Step 7
-    export header. A document deleted since the run was saved still shows
-    (as "Document #N (deleted)") rather than silently vanishing from the
+    """Resolve a run's stored document_ids to titles, for the export
+    header. A document deleted since the run was saved still shows (as
+    "Document #N (deleted)") rather than silently vanishing from the
     provenance record."""
     titles = []
     for doc_id in document_ids:
@@ -1174,14 +1008,16 @@ def get_document(document_id: int) -> dict | None:
     is bytes for a PDF document, str for a text one."""
     conn = get_connection()
     try:
-        row = conn.execute(
+        cur = _dict_cursor(conn)
+        cur.execute(
             "SELECT id, title, content, content_format, is_pinned, created_at "
-            "FROM documents WHERE id = ?",
+            "FROM documents WHERE id = %s",
             (document_id,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         return _decode_document_row(dict(row)) if row else None
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def update_document(document_id: int, title: str, content: str) -> None:
@@ -1192,20 +1028,20 @@ def update_document(document_id: int, title: str, content: str) -> None:
     those; see replace_document_pdf() for how a PDF's content changes."""
     conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT is_pinned FROM documents WHERE id = ?", (document_id,)
-        ).fetchone()
+        cur = conn.cursor()
+        cur.execute("SELECT is_pinned FROM documents WHERE id = %s", (document_id,))
+        row = cur.fetchone()
         if row is None:
             raise DocumentError(f"No document with id {document_id}")
-        if row["is_pinned"]:
+        if row[0]:
             raise DocumentError("Pinned documents cannot be edited.")
-        conn.execute(
-            "UPDATE documents SET title = ?, content = ? WHERE id = ?",
+        cur.execute(
+            "UPDATE documents SET title = %s, content = %s WHERE id = %s",
             (title, content, document_id),
         )
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def replace_document_pdf(document_id: int, pdf_content: bytes) -> None:
@@ -1217,16 +1053,17 @@ def replace_document_pdf(document_id: int, pdf_content: bytes) -> None:
     later replaced, and works the same way on a non-pinned document."""
     conn = get_connection()
     try:
-        row = conn.execute("SELECT id FROM documents WHERE id = ?", (document_id,)).fetchone()
-        if row is None:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM documents WHERE id = %s", (document_id,))
+        if cur.fetchone() is None:
             raise DocumentError(f"No document with id {document_id}")
-        conn.execute(
-            "UPDATE documents SET content = ?, content_format = 'pdf' WHERE id = ?",
+        cur.execute(
+            "UPDATE documents SET content = %s, content_format = 'pdf' WHERE id = %s",
             (_encode_document_content(pdf_content, "pdf"), document_id),
         )
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def delete_document(document_id: int) -> None:
@@ -1235,17 +1072,17 @@ def delete_document(document_id: int) -> None:
     documents."""
     conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT is_pinned FROM documents WHERE id = ?", (document_id,)
-        ).fetchone()
+        cur = conn.cursor()
+        cur.execute("SELECT is_pinned FROM documents WHERE id = %s", (document_id,))
+        row = cur.fetchone()
         if row is None:
             return  # already gone; nothing to do
-        if row["is_pinned"]:
+        if row[0]:
             raise DocumentError("Pinned documents cannot be deleted.")
-        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
         conn.commit()
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 # Make sure the database and tables exist as soon as this module is
