@@ -3,11 +3,12 @@
 A local Streamlit app for processing Hacking for Defense customer-discovery
 interviews. Built iteratively in small, verified steps.
 
-**Current status: through Step 6.** The core two-step AI analysis engine,
-interview storage with rerun history, a hypothesis tree, reference
-documents (with a pinned Mom Test doc), and interviewee metadata + a
-People view are all built and working. Chat (Step 7) and cross-interview
-comparison (Step 8) are not built yet.
+**Current status: through Step 7 (export).** The core two-step AI
+analysis engine, interview storage with rerun history, a hypothesis
+tree, reference documents (with a pinned Mom Test doc), interviewee
+metadata + a People view, and exporting a run to Markdown/.txt are all
+built and working. Chat and cross-interview corpus comparison are not
+built yet.
 
 **Live AI processing (Process Interview page, and the Interviews page's
 rerun control) requires an Anthropic API key**, entered on the Settings
@@ -21,7 +22,8 @@ and past runs — works with no key.
   (clarifying questions, then the full analysis), review results as
   tables, and confirm interviewee metadata. Saves automatically.
 - **Interviews** — browse every saved interview, review all of its past
-  runs (each kept forever), and rerun it against a different hypothesis
+  runs (each kept forever, each exportable to Markdown/.txt with a
+  provenance header), and rerun it against a different hypothesis
   without losing earlier runs.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, toggle active/dormant. Nothing is ever
@@ -30,7 +32,7 @@ and past runs — works with no key.
   can use as context; includes a permanent, protected Mom Test principles
   doc (pinned, can't be edited or deleted).
 - **People** — browsable table of everyone interviewed, with editable
-  metadata and their linked interview(s)/runs.
+  metadata and their linked interview(s)/runs (also exportable).
 - **Chat** — placeholder; planned for a later step.
 - **Settings** — enter your Anthropic API key (kept only in the browser
   session, not saved to disk).
@@ -46,8 +48,10 @@ and past runs — works with no key.
 - `storage.py` — **all** persistence, backed by SQLite, behind simple
   named functions (`save_interview`, `get_interviews`, ...). If the
   backend is ever swapped to a hosted database, only this file changes.
-  Schema changes so far have all been additive migrations, applied
-  automatically the next time the app runs.
+  Schema changes are applied automatically the next time the app runs
+  (additive migrations, plus a one-time cleanup that removed a handful of
+  columns/a table left over from early-step scaffolding that no code ever
+  read or wrote — see `_cleanup_dead_schema_v1` for exactly what and why).
 - `render.py` — shared table/markdown rendering for a run's output, used
   by every page that displays one, so results look identical everywhere.
 - `config.py` — model name / API version.
@@ -121,5 +125,5 @@ needed) from a file in `backups/` instead.
 
 ## What's next
 
-Step 7 (chat) and Step 8 (cross-interview corpus comparison) are not
-built yet. Each step is built and verified before the next begins.
+Chat and cross-interview corpus comparison are not built yet. Each step
+is built and verified before the next begins.

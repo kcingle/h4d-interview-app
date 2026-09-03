@@ -37,9 +37,12 @@ def init_db() -> None:
       - runs: one row per AI processing pass over an interview, so
         reruns against different hypotheses never overwrite history (Step 3);
         also records which reference documents were used (Step 5).
-      - run_hypotheses: NOT currently used by any code — see the Step 6
-        cleanup review for details; left in place pending a decision.
       - documents: reference docs, incl. a pinned Mom Test doc (Step 5).
+
+    This is the CURRENT (post schema-cleanup) shape, used as-is for a
+    brand-new database. An existing database created before the cleanup
+    is brought to this same shape by _cleanup_dead_schema_v1() below —
+    see that function for what was removed and why.
     """
     conn = get_connection()
     try:
@@ -50,8 +53,6 @@ def init_db() -> None:
                 name TEXT NOT NULL,
                 role TEXT,
                 organization TEXT,
-                email TEXT,
-                notes TEXT,
                 seniority_level TEXT,
                 relationship TEXT,
                 interview_date TEXT,
@@ -71,10 +72,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS hypotheses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                family TEXT NOT NULL,
-                version TEXT NOT NULL,
                 statement TEXT NOT NULL,
-                is_active_for_testing INTEGER NOT NULL DEFAULT 1,
                 label TEXT,
                 state TEXT NOT NULL DEFAULT 'active',
                 parent_id INTEGER,
@@ -94,18 +92,9 @@ def init_db() -> None:
                 FOREIGN KEY (interview_id) REFERENCES interviews (id)
             );
 
-            CREATE TABLE IF NOT EXISTS run_hypotheses (
-                run_id INTEGER NOT NULL,
-                hypothesis_id INTEGER NOT NULL,
-                PRIMARY KEY (run_id, hypothesis_id),
-                FOREIGN KEY (run_id) REFERENCES runs (id),
-                FOREIGN KEY (hypothesis_id) REFERENCES hypotheses (id)
-            );
-
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
-                doc_type TEXT,
                 content TEXT,
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
@@ -115,6 +104,7 @@ def init_db() -> None:
         _migrate_runs_table(conn)
         _migrate_hypotheses_table(conn)
         _migrate_people_table(conn)
+        _cleanup_dead_schema_v1(conn)
         _seed_hypotheses_if_empty(conn)
         _seed_mom_test_document_if_missing(conn)
         _seed_people_if_empty(conn)
@@ -141,12 +131,12 @@ def _migrate_runs_table(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_hypotheses_table(conn: sqlite3.Connection) -> None:
-    """Add Step 4's new `hypotheses` columns to a database created before
-    Step 4 existed. A no-op on a fresh database, where CREATE TABLE
-    already included them. `family`, `version`, and `is_active_for_testing`
-    are legacy columns from before Step 4's design was finalized — left in
-    place (additive-only migration) but unused by any Step 4 code, which
-    reads/writes only `label`, `statement`, `state`, `parent_id`."""
+    """Add Step 4's new `hypotheses` columns (`label`, `state`) to a
+    database created before Step 4 existed. A no-op on a fresh database,
+    where CREATE TABLE already included them. (The old `family`,
+    `version`, and `is_active_for_testing` columns this docstring used to
+    mention here were removed entirely by the schema cleanup — see
+    _cleanup_dead_schema_v1 below.)"""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(hypotheses)")}
     migrations = {
         "label": "ALTER TABLE hypotheses ADD COLUMN label TEXT",
@@ -168,8 +158,8 @@ def _seed_hypotheses_if_empty(conn: sqlite3.Connection) -> None:
 
     def insert(parent_id, label, text, state):
         conn.execute(
-            "INSERT INTO hypotheses (family, version, statement, label, state, "
-            "parent_id, created_at) VALUES ('', '', ?, ?, ?, ?, ?)",
+            "INSERT INTO hypotheses (statement, label, state, parent_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
             (text, label, state, parent_id, _now()),
         )
         return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -242,9 +232,9 @@ def _seed_mom_test_document_if_missing(conn: sqlite3.Connection) -> None:
 
 def _migrate_people_table(conn: sqlite3.Connection) -> None:
     """Add Step 6's new `people` columns to a database created before Step
-    6 existed. A no-op on a fresh database. `email`/`notes` are unused
-    legacy columns from before Step 6's design was finalized — left in
-    place (additive-only) but unused by Step 6 code."""
+    6 existed. A no-op on a fresh database. (The old `email`/`notes`
+    columns this docstring used to mention here were removed entirely by
+    the schema cleanup — see _cleanup_dead_schema_v1 below.)"""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
     migrations = {
         "seniority_level": "ALTER TABLE people ADD COLUMN seniority_level TEXT",
@@ -255,6 +245,96 @@ def _migrate_people_table(conn: sqlite3.Connection) -> None:
     for column, ddl in migrations.items():
         if column not in existing:
             conn.execute(ddl)
+
+
+def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
+    """One-time removal of columns/tables that were part of an earlier
+    step's provisional schema but were never read or written by any code:
+    hypotheses.family/version/is_active_for_testing, people.email/notes,
+    documents.doc_type, and the run_hypotheses table (never populated —
+    no code ever inserted into, selected from, or joined against it).
+
+    Idempotent: each check looks for the dead column/table's presence
+    before acting, so this is a no-op on a database that's already been
+    cleaned, or one created fresh after this cleanup existed (its CREATE
+    TABLE statements above never included these in the first place).
+
+    SQLite (as used here, via Python's bundled sqlite3 module) has no
+    DROP COLUMN, so each affected table is recreated with the trimmed
+    column set: every surviving row is copied across by explicit column
+    name (never SELECT *, never by position), the old table is dropped,
+    and the new one is renamed into place. `id` is always carried
+    forward unchanged, so parent_id/person_id references elsewhere stay
+    valid, and SQLite's ALTER TABLE RENAME automatically updates other
+    tables' FOREIGN KEY clauses that pointed to the old table name.
+    """
+    hyp_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hypotheses)")}
+    if {"family", "version", "is_active_for_testing"} & hyp_columns:
+        conn.executescript(
+            """
+            CREATE TABLE hypotheses_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                statement TEXT NOT NULL,
+                label TEXT,
+                state TEXT NOT NULL DEFAULT 'active',
+                parent_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (parent_id) REFERENCES hypotheses_new (id)
+            );
+            INSERT INTO hypotheses_new (id, statement, label, state, parent_id, created_at)
+                SELECT id, statement, label, state, parent_id, created_at FROM hypotheses;
+            DROP TABLE hypotheses;
+            ALTER TABLE hypotheses_new RENAME TO hypotheses;
+            """
+        )
+
+    people_columns = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
+    if {"email", "notes"} & people_columns:
+        conn.executescript(
+            """
+            CREATE TABLE people_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                role TEXT,
+                organization TEXT,
+                seniority_level TEXT,
+                relationship TEXT,
+                interview_date TEXT,
+                descriptor TEXT,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO people_new (id, name, role, organization, seniority_level,
+                relationship, interview_date, descriptor, created_at)
+                SELECT id, name, role, organization, seniority_level,
+                    relationship, interview_date, descriptor, created_at FROM people;
+            DROP TABLE people;
+            ALTER TABLE people_new RENAME TO people;
+            """
+        )
+
+    doc_columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "doc_type" in doc_columns:
+        conn.executescript(
+            """
+            CREATE TABLE documents_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO documents_new (id, title, content, is_pinned, created_at)
+                SELECT id, title, content, is_pinned, created_at FROM documents;
+            DROP TABLE documents;
+            ALTER TABLE documents_new RENAME TO documents;
+            """
+        )
+
+    run_hyp_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'run_hypotheses'"
+    ).fetchone()
+    if run_hyp_exists:
+        conn.execute("DROP TABLE run_hypotheses")
 
 
 # --- SEED DATA (Step 6 demo people) -----------------------------------------
@@ -427,8 +507,8 @@ def add_hypothesis(parent_id: int | None, text: str) -> int:
             label = _next_child_label(conn, parent_id, parent["label"])
 
         cur = conn.execute(
-            "INSERT INTO hypotheses (family, version, statement, label, state, "
-            "parent_id, created_at) VALUES ('', '', ?, ?, 'active', ?, ?)",
+            "INSERT INTO hypotheses (statement, label, state, parent_id, created_at) "
+            "VALUES (?, ?, 'active', ?, ?)",
             (text, label, parent_id, _now()),
         )
         conn.commit()
