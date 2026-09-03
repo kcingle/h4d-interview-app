@@ -42,6 +42,14 @@ and past runs — works with no key.
   interviewed (name, role, organization, rank, branch/service, seniority,
   relationship, interview status, date, descriptor), with an editable
   form per person and their linked interview(s)/runs (also exportable).
+- **Hypothesis Status** — select a hypothesis and see every interview
+  that tested it, rolled up from digests (never full transcripts):
+  mechanical validated/invalidated/untested counts, each interview's
+  verdict with its verbatim quote and interviewee, a clearly separated
+  "unsupported/inferred" section for any verdict with no verified quote,
+  and the hypothesis's full version lineage with its own per-version
+  counts. This page only organizes what interviews already said — it
+  never generates a summary interpretation.
 - **Chat** — placeholder; planned for a later step.
 - **Settings** — enter your Anthropic API key (kept only in the browser
   session, not saved to disk).
@@ -89,6 +97,14 @@ A run processed before this existed has an old, thin digest — the
 Interviews page shows this and offers a **Regenerate digest** button,
 which rebuilds it from that run's already-saved output (no reprocessing,
 no re-reading the transcript through the two-step flow again).
+
+**Known gap:** hypothesis selection isn't wired into the processing flow
+yet — every run tests either the hardcoded default hypothesis or free
+text typed into the Interviews page's rerun box, neither linked to a
+hypothesis-tree node. The Hypothesis Status page matches a run to a tree
+node by exact hypothesis text (case/whitespace-normalized), so an
+interview only shows up under a tree hypothesis if it was actually
+processed against that hypothesis's exact wording.
 
 ## Setup (Windows PowerShell)
 

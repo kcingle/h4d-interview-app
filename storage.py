@@ -12,6 +12,7 @@ has been an additive migration — see the `_migrate_*` functions below.
 
 import base64
 import json
+import re
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
@@ -669,6 +670,85 @@ def edit_hypothesis_text(hypothesis_id: int, text: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _normalize_hypothesis_text(text: str) -> str:
+    """Whitespace/case-normalized form used to match a run's
+    hypothesis_text against a tree node's statement. Deliberately exact
+    (not fuzzy/substring) — a loose match risks attributing an
+    interview's verdict to the wrong hypothesis, which matters more here
+    than catching near-miss wording."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
+    """Roll up every interview whose run tested this exact hypothesis
+    (matched against run.hypothesis_text — see _normalize_hypothesis_text)
+    using the ALREADY-VERIFIED quotes in each run's digest. Pure
+    retrieval/aggregation, no AI call: this never synthesizes an
+    interpretation, only organizes what interviews already said.
+
+    Returns:
+      {
+        "counts": {"Validated": n, "Invalidated": n, "Untested": n},
+        "quote_backed": [  # verdict has a verified quote
+            {"interview_id", "interview_title", "run_id", "status",
+             "quotes": [...], "interviewee": {...} | None}, ...
+        ],
+        "unsupported": [  # verdict exists but NO verified quote —
+            # includes matches against an old, pre-enrichment thin digest
+            {"interview_id", "interview_title", "run_id", "status",
+             "interviewee": {...} | None, "reason": str}, ...
+        ],
+      }
+    """
+    target = _normalize_hypothesis_text(hypothesis_statement)
+    counts = {"Validated": 0, "Invalidated": 0, "Untested": 0}
+    quote_backed = []
+    unsupported = []
+
+    for interview in get_interviews():
+        person = get_person_for_interview(interview["id"])
+        for run in get_runs_for_interview(interview["id"]):
+            if _normalize_hypothesis_text(run["hypothesis_text"]) != target:
+                continue
+
+            digest = run.get("digest") or {}
+            base_entry = {
+                "interview_id": interview["id"],
+                "interview_title": interview["title"],
+                "run_id": run["id"],
+                "interviewee": person,
+            }
+
+            if digest.get("digest_version", 1) < 2:
+                # Old thin digest: matched by hypothesis_text but has no
+                # quote-anchored per-hypothesis data at all.
+                status = digest.get("status", "Untested")
+                counts[status] = counts.get(status, 0) + 1
+                unsupported.append({
+                    **base_entry, "status": status,
+                    "reason": "Old digest format — regenerate on the Interviews page for quotes.",
+                })
+                continue
+
+            hyp_entries = digest.get("hypotheses") or []
+            if not hyp_entries:
+                continue
+            entry = hyp_entries[0]
+            status = entry.get("status", "Untested")
+            quotes = entry.get("quotes") or []
+            counts[status] = counts.get(status, 0) + 1
+
+            if quotes:
+                quote_backed.append({**base_entry, "status": status, "quotes": quotes})
+            else:
+                unsupported.append({
+                    **base_entry, "status": status,
+                    "reason": "Verdict given, but no quote from the notes verified it.",
+                })
+
+    return {"counts": counts, "quote_backed": quote_backed, "unsupported": unsupported}
 
 
 # ---------------------------------------------------------------------------
