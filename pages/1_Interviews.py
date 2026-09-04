@@ -8,7 +8,7 @@ import streamlit as st
 
 import ai
 import storage
-from render import DEFAULT_HYPOTHESIS, build_export_header, render_analysis
+from render import build_export_header, render_analysis, render_hypothesis_picker
 
 st.set_page_config(page_title="H4D Interview App — Interviews", page_icon="🗂️")
 
@@ -75,7 +75,7 @@ else:
                 )
             if st.button("🔄 Regenerate digest", key=f"regen_digest_{run['id']}"):
                 new_digest = ai.build_digest(
-                    run["hypothesis_text"],
+                    run["hypotheses"],
                     run["output"],
                     selected["raw_text"],
                     digest_api_key,
@@ -89,8 +89,8 @@ st.divider()
 st.subheader("Rerun this interview")
 st.caption(
     "Runs the same two-step AI flow on this interview's saved notes against "
-    "the hypothesis below, and adds the result as a new run — earlier runs "
-    "are kept."
+    "the hypotheses checked below, and adds the result as a new run — "
+    "earlier runs are kept."
 )
 
 api_key = st.session_state.get("api_key", "")
@@ -102,23 +102,24 @@ rerun_stage_key = f"rerun_stage_{interview_id}"
 if rerun_stage_key not in st.session_state:
     st.session_state[rerun_stage_key] = "idle"
 
-rerun_hypothesis = st.text_input(
-    "Hypothesis to test",
-    value=DEFAULT_HYPOTHESIS,
-    key=f"rerun_hypothesis_{interview_id}",
+rerun_hypothesis_tree = storage.get_hypothesis_tree()
+rerun_hypotheses = render_hypothesis_picker(
+    rerun_hypothesis_tree, key_prefix=f"rerun_hyp_{interview_id}"
 )
+if not rerun_hypotheses:
+    st.warning("Select at least one hypothesis to test.")
 
 if st.button(
     "Start rerun",
     key=f"start_rerun_{interview_id}",
-    disabled=not rerun_hypothesis.strip(),
+    disabled=not rerun_hypotheses,
 ):
     try:
         with st.spinner("Asking clarifying questions..."):
-            step1 = ai.run_step1(rerun_hypothesis, selected["raw_text"], api_key)
+            step1 = ai.run_step1(rerun_hypotheses, selected["raw_text"], api_key)
         st.session_state[f"rerun_questions_{interview_id}"] = step1["questions"]
         st.session_state[f"rerun_history_{interview_id}"] = step1["history"]
-        st.session_state[f"rerun_hypothesis_used_{interview_id}"] = rerun_hypothesis
+        st.session_state[f"rerun_hypotheses_used_{interview_id}"] = rerun_hypotheses
         st.session_state[rerun_stage_key] = "awaiting_answers"
     except ai.AIError as e:
         st.error(str(e))
@@ -141,15 +142,15 @@ if st.session_state[rerun_stage_key] == "awaiting_answers":
             with st.spinner("Running the full analysis..."):
                 rerun_history = st.session_state[f"rerun_history_{interview_id}"]
                 analysis = ai.run_step2(rerun_history, rerun_questions, rerun_answers, api_key)
-            hypothesis_used = st.session_state[f"rerun_hypothesis_used_{interview_id}"]
+            hypotheses_used = st.session_state[f"rerun_hypotheses_used_{interview_id}"]
             digest = ai.build_digest(
-                hypothesis_used, analysis, selected["raw_text"], api_key, interview_person
+                hypotheses_used, analysis, selected["raw_text"], api_key, interview_person
             )
             # Step 5: no document checklist on this rerun control yet
             # (only the Process Interview page has one) — record an empty
             # document set rather than omitting provenance entirely.
             new_run_id = storage.save_run(
-                interview_id, hypothesis_used, rerun_questions, rerun_answers, analysis, digest,
+                interview_id, hypotheses_used, rerun_questions, rerun_answers, analysis, digest,
                 document_ids=[],
             )
             st.session_state[rerun_stage_key] = "idle"

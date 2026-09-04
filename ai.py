@@ -304,9 +304,14 @@ def _extract_json(response) -> dict:
 
 
 def run_step1(
-    hypothesis: str, raw_notes: str, api_key: str, documents: list[dict] | None = None
+    hypotheses: list[str], raw_notes: str, api_key: str, documents: list[dict] | None = None
 ) -> dict:
     """Step 1: ask up to three clarifying questions about the interview.
+
+    `hypotheses`: one or more hypotheses being tested this run — the
+    graded SYSTEM_PROMPT above already says "one or more hypotheses"; the
+    app just lists every one of them in the user message below (the
+    prompt text itself never changes based on how many there are).
 
     `documents` (Step 5, optional): reference documents to include as
     context — each a dict with at least "title", "content", and
@@ -319,8 +324,9 @@ def run_step1(
     conversation stays intact across both steps.
     """
     client = _client(api_key)
+    hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
     user_text = (
-        f"Hypotheses being tested:\n- {hypothesis}\n\n"
+        f"Hypotheses being tested:\n{hypotheses_block}\n\n"
         f"Raw interview notes:\n{raw_notes}"
     )
     user_content = _build_user_message_content(user_text, documents)
@@ -459,7 +465,10 @@ def suggest_metadata(raw_notes: str, api_key: str) -> dict:
 # just trusted a second time.
 # ---------------------------------------------------------------------------
 
-DIGEST_VERSION = 2
+DIGEST_VERSION = 3  # v3: each hypotheses[] entry carries its own exact
+# "hypothesis" string (multi-hypothesis support) alongside the model's
+# "claim" restatement; digest_version >= 2 checks elsewhere in the
+# codebase still correctly treat v3 as "rich" — no code needed updating.
 
 _TOPIC_TAGS_SYSTEM_PROMPT = (
     "You are extracting short topic/keyword tags for a processed DoD "
@@ -480,7 +489,7 @@ _TOPIC_TAGS_SCHEMA = {
 }
 
 
-def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
+def _suggest_topics(hypotheses: list[str], analysis: dict, api_key: str) -> list[str]:
     """Suggest short topic/keyword tags. This is the one small, separate
     AI call the digest adds — nothing in the Step 2 output already
     produces tags. Fed the CONDENSED analysis (pains/gains + Slack
@@ -495,6 +504,7 @@ def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
         ]
         summary_bits.append(analysis.get("slack_writeup", {}).get("what_we_learned", ""))
         summary_text = "\n".join(b for b in summary_bits if b)
+        hypotheses_line = "; ".join(hypotheses)
 
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
@@ -502,7 +512,7 @@ def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
             max_tokens=256,
             system=_TOPIC_TAGS_SYSTEM_PROMPT,
             messages=[
-                {"role": "user", "content": f"Hypothesis: {hypothesis}\n\nSummary:\n{summary_text}"}
+                {"role": "user", "content": f"Hypotheses: {hypotheses_line}\n\nSummary:\n{summary_text}"}
             ],
             output_config={"format": {"type": "json_schema", "schema": _TOPIC_TAGS_SCHEMA}},
         )
@@ -548,7 +558,7 @@ def _extract_verified_quotes(evidence: str, raw_notes: str) -> list[str]:
 
 
 def build_digest(
-    hypothesis: str,
+    hypotheses: list[str],
     analysis: dict,
     raw_notes: str,
     api_key: str = "",
@@ -563,19 +573,39 @@ def build_digest(
     topics list when there's no key or that call fails — never crashing
     and never leaving other fields incomplete because of it.
 
+    `hypotheses`: every hypothesis tested this run (one or more), in the
+    SAME order they were sent to run_step1/run_step2. Paired POSITIONALLY
+    with analysis["hypothesis_ledger"] (the model is asked for "one row
+    per hypothesis tested," in the same order) — each digest entry then
+    carries the exact tested string in its "hypothesis" field (not just
+    the model's own "claim" restatement), which is what later cross-run
+    matching (Hypothesis Status, Compare) keys off. If the model produced
+    fewer ledger rows than hypotheses tested, the missing ones are marked
+    Untested with no quotes rather than guessing which is missing — same
+    anti-fabrication rule as everywhere else in this digest.
+
     `person` (optional): the interviewee's metadata, if already known.
     Often not yet known when a run is first saved (metadata confirmation
     happens right after) — pass None then, and call this again once
     confirmed to refresh the digest's interviewee field.
     """
-    hypotheses_digest = [
-        {
-            "claim": row.get("claim", ""),
-            "status": row.get("status", "Untested"),
-            "quotes": _extract_verified_quotes(row.get("evidence", ""), raw_notes),
-        }
-        for row in analysis.get("hypothesis_ledger", [])
-    ]
+    ledger = analysis.get("hypothesis_ledger", [])
+    hypotheses_digest = []
+    for i, hypothesis_text in enumerate(hypotheses):
+        if i < len(ledger):
+            row = ledger[i]
+            hypotheses_digest.append({
+                "hypothesis": hypothesis_text,
+                "claim": row.get("claim", ""),
+                "status": row.get("status", "Untested"),
+                "quotes": _extract_verified_quotes(row.get("evidence", ""), raw_notes),
+            })
+        else:
+            # The model produced fewer ledger rows than hypotheses tested —
+            # don't guess which one is missing.
+            hypotheses_digest.append({
+                "hypothesis": hypothesis_text, "claim": "", "status": "Untested", "quotes": [],
+            })
 
     pains, gains = [], []
     for row in analysis.get("pains_and_gains", []):
@@ -599,11 +629,11 @@ def build_digest(
 
     return {
         "digest_version": DIGEST_VERSION,
-        "hypothesis": hypothesis,
+        "hypotheses_tested": list(hypotheses),
         "interviewee": interviewee,
         "hypotheses": hypotheses_digest,
         "pains": pains,
         "gains": gains,
-        "topics": _suggest_topics(hypothesis, analysis, api_key),
+        "topics": _suggest_topics(hypotheses, analysis, api_key),
         "claims_to_verify": list(analysis.get("claims_to_verify", [])),
     }

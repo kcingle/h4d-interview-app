@@ -89,6 +89,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 interview_id INTEGER NOT NULL,
                 hypothesis_text TEXT NOT NULL DEFAULT '',
+                hypotheses_json TEXT,
                 questions_json TEXT,
                 answers_json TEXT,
                 output_json TEXT,
@@ -133,6 +134,7 @@ def _migrate_runs_table(conn: sqlite3.Connection) -> None:
         "answers_json": "ALTER TABLE runs ADD COLUMN answers_json TEXT",
         "digest_json": "ALTER TABLE runs ADD COLUMN digest_json TEXT",
         "document_ids_json": "ALTER TABLE runs ADD COLUMN document_ids_json TEXT",
+        "hypotheses_json": "ALTER TABLE runs ADD COLUMN hypotheses_json TEXT",
     }
     for column, ddl in migrations.items():
         if column not in existing:
@@ -681,12 +683,38 @@ def _normalize_hypothesis_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
+def _find_digest_entry_for_hypothesis(hyp_entries: list[dict], target_normalized: str) -> dict | None:
+    """Find the digest hypothesis-ledger entry that corresponds to a
+    specific tested hypothesis (by exact normalized match against the
+    entry's own "hypothesis" field — the authoritative tested string,
+    present on any digest built after multi-hypothesis support existed).
+
+    Falls back to the single entry when there's only one and no entry
+    carries a "hypothesis" field at all — an older, single-hypothesis
+    digest built before this field existed, where there's no ambiguity
+    to worry about since only one hypothesis was ever tested that run.
+
+    Returns None (never guesses) if neither case applies — e.g. a
+    multi-hypothesis run whose ledger entry count doesn't line up with
+    what was tested. A caller then correctly treats this as unsupported
+    rather than risk attributing the wrong evidence to the wrong claim.
+    """
+    for entry in hyp_entries:
+        entry_hyp = entry.get("hypothesis") or entry.get("claim", "")
+        if _normalize_hypothesis_text(entry_hyp) == target_normalized:
+            return entry
+    if len(hyp_entries) == 1 and "hypothesis" not in hyp_entries[0]:
+        return hyp_entries[0]
+    return None
+
+
 def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
     """Roll up every interview whose run tested this exact hypothesis
-    (matched against run.hypothesis_text — see _normalize_hypothesis_text)
-    using the ALREADY-VERIFIED quotes in each run's digest. Pure
-    retrieval/aggregation, no AI call: this never synthesizes an
-    interpretation, only organizes what interviews already said.
+    (matched against the run's full list of tested hypotheses — see
+    _normalize_hypothesis_text) using the ALREADY-VERIFIED quotes in each
+    run's digest. Pure retrieval/aggregation, no AI call: this never
+    synthesizes an interpretation, only organizes what interviews already
+    said.
 
     Returns:
       {
@@ -710,7 +738,7 @@ def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
     for interview in get_interviews():
         person = get_person_for_interview(interview["id"])
         for run in get_runs_for_interview(interview["id"]):
-            if _normalize_hypothesis_text(run["hypothesis_text"]) != target:
+            if target not in {_normalize_hypothesis_text(h) for h in run["hypotheses"]}:
                 continue
 
             digest = run.get("digest") or {}
@@ -733,9 +761,10 @@ def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
                 continue
 
             hyp_entries = digest.get("hypotheses") or []
-            if not hyp_entries:
-                continue
-            entry = hyp_entries[0]
+            entry = _find_digest_entry_for_hypothesis(hyp_entries, target)
+            if entry is None:
+                continue  # matched at the run level, but can't confidently
+                          # attribute a specific ledger entry -- skip, don't guess
             status = entry.get("status", "Untested")
             quotes = entry.get("quotes") or []
             counts[status] = counts.get(status, 0) + 1
@@ -846,14 +875,14 @@ def compare_interviews_on_hypothesis(interview_ids: list[int], hypothesis_statem
         person = get_person_for_interview(interview_id)
         match = None
         for run in get_runs_for_interview(interview_id):
-            if _normalize_hypothesis_text(run["hypothesis_text"]) != target:
+            if target not in {_normalize_hypothesis_text(h) for h in run["hypotheses"]}:
                 continue
             digest = run.get("digest") or {}
             if digest.get("digest_version", 1) < 2:
                 continue
             hyp_entries = digest.get("hypotheses") or []
-            if hyp_entries:
-                match = hyp_entries[0]
+            match = _find_digest_entry_for_hypothesis(hyp_entries, target)
+            if match is not None:
                 break
         results.append({
             "interview_id": interview_id,
@@ -891,7 +920,7 @@ def compare_interviews_on_topic(interview_ids: list[int], topic: str) -> list[di
 
 def save_run(
     interview_id: int,
-    hypothesis_text: str,
+    hypotheses: list[str],
     questions: list[str],
     answers: list[str],
     output: dict,
@@ -901,22 +930,27 @@ def save_run(
     """Save one processing run for an interview and return its new row id.
 
     Every call INSERTs a new row — reruns never overwrite or replace an
-    earlier run. The hypothesis text is stored verbatim on the run itself
-    (not just referenced), so an old run stays meaningful even if the
-    hypothesis wording is edited later. `document_ids` records which
-    reference documents (Step 5) were included as context for this run —
+    earlier run. `hypotheses` is the full list of hypotheses tested this
+    run (one or more) — stored verbatim (not just referenced), so an old
+    run stays meaningful even if a hypothesis's tree wording is edited
+    later. `hypothesis_text` (a "; "-joined display string) is kept
+    alongside for backward compatibility with anything that just wants a
+    single human-readable label — every page that displays it already
+    works unchanged for a multi-hypothesis run. `document_ids` records
+    which reference documents were included as context for this run —
     provenance for defending which context produced a given analysis.
     """
     conn = get_connection()
     try:
         cur = conn.execute(
             "INSERT INTO runs "
-            "(interview_id, hypothesis_text, questions_json, answers_json, "
-            "output_json, digest_json, document_ids_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(interview_id, hypothesis_text, hypotheses_json, questions_json, "
+            "answers_json, output_json, digest_json, document_ids_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 interview_id,
-                hypothesis_text,
+                "; ".join(hypotheses),
+                json.dumps(hypotheses),
                 json.dumps(questions),
                 json.dumps(answers),
                 json.dumps(output),
@@ -935,12 +969,15 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
     """Return every run for one interview, oldest first (so "Run 1", "Run 2"
     labels line up with processing order), with the JSON columns already
     parsed back into Python objects (questions/answers/output/digest/
-    document_ids). Runs saved before Step 5 have no document_ids_json —
-    those load fine with document_ids == []."""
+    document_ids/hypotheses). Runs saved before Step 5 have no
+    document_ids_json — those load fine with document_ids == []. Runs
+    saved before multi-hypothesis support has no hypotheses_json — those
+    load fine with hypotheses == [hypothesis_text] (a one-element list),
+    so every run — old or new — has a consistent, matchable list."""
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, interview_id, hypothesis_text, questions_json, "
+            "SELECT id, interview_id, hypothesis_text, hypotheses_json, questions_json, "
             "answers_json, output_json, digest_json, document_ids_json, created_at "
             "FROM runs WHERE interview_id = ? ORDER BY created_at ASC",
             (interview_id,),
@@ -948,6 +985,8 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
         runs = []
         for row in rows:
             d = dict(row)
+            hypotheses_json = d.pop("hypotheses_json")
+            d["hypotheses"] = json.loads(hypotheses_json) if hypotheses_json else [d["hypothesis_text"]]
             d["questions"] = json.loads(d.pop("questions_json") or "[]")
             d["answers"] = json.loads(d.pop("answers_json") or "[]")
             d["output"] = json.loads(d.pop("output_json") or "{}")

@@ -17,15 +17,16 @@ and past runs — works with no key.
 
 ## Pages
 
-- **Process Interview** (`app.py`, the home page) — pick reference
-  documents to include, paste interview notes, run the two-step AI flow
-  (clarifying questions, then the full analysis), review results as
-  tables, and confirm interviewee metadata. Saves automatically.
+- **Process Interview** (`app.py`, the home page) — check off one or more
+  hypotheses from the tree to test this run (active ones pre-checked),
+  pick reference documents to include, paste interview notes, run the
+  two-step AI flow (clarifying questions, then the full analysis), review
+  results as tables, and confirm interviewee metadata. Saves automatically.
 - **Interviews** — browse every saved interview, review all of its past
   runs (each kept forever, each exportable to Markdown/.txt with a
   provenance header), inspect or regenerate that run's structured digest
-  (see below), and rerun the interview against a different hypothesis
-  without losing earlier runs.
+  (see below), and rerun the interview against one or more different
+  hypotheses without losing earlier runs.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, toggle active/dormant. Nothing is ever
   deleted.
@@ -104,13 +105,14 @@ Interviews page shows this and offers a **Regenerate digest** button,
 which rebuilds it from that run's already-saved output (no reprocessing,
 no re-reading the transcript through the two-step flow again).
 
-**Known gap:** hypothesis selection isn't wired into the processing flow
-yet — every run tests either the hardcoded default hypothesis or free
-text typed into the Interviews page's rerun box, neither linked to a
-hypothesis-tree node. The Hypothesis Status page matches a run to a tree
-node by exact hypothesis text (case/whitespace-normalized), so an
-interview only shows up under a tree hypothesis if it was actually
-processed against that hypothesis's exact wording.
+Hypothesis selection is a checklist sourced directly from the hypothesis
+tree (on both Process Interview and the Interviews page's rerun control),
+and a single run can test one or more hypotheses at once. Each digest
+entry records the exact hypothesis text it was tested against, so the
+Hypothesis Status and Search & Compare pages can match a run's verdict
+back to the right tree node (case/whitespace-normalized, still exact —
+not fuzzy — to avoid attributing evidence to the wrong hypothesis) even
+when a run tested several hypotheses in one pass.
 
 ## Setup (Windows PowerShell)
 

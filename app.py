@@ -20,7 +20,7 @@ import streamlit as st
 
 import ai
 import storage  # noqa: F401  (importing this ensures the SQLite DB/tables exist)
-from render import DEFAULT_HYPOTHESIS, build_export_header, render_analysis
+from render import build_export_header, render_analysis, render_hypothesis_picker
 
 RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
 INTERVIEW_STATUS_OPTIONS = list(storage.ALLOWED_INTERVIEW_STATUSES)
@@ -36,9 +36,15 @@ if not api_key:
         "No Anthropic API key set yet. Enter one on the **Settings** page, then come back here."
     )
 
-st.subheader("Hypothesis being tested")
-st.info(DEFAULT_HYPOTHESIS)
-st.caption("Hardcoded for this step — hypothesis selection comes in a later step.")
+st.subheader("Hypotheses being tested")
+st.caption(
+    "Active hypotheses are pre-checked. Check or uncheck any to test one "
+    "or more of them this run."
+)
+hypothesis_tree = storage.get_hypothesis_tree()
+selected_hypotheses = render_hypothesis_picker(hypothesis_tree, key_prefix="process_hyp")
+if not selected_hypotheses:
+    st.warning("Select at least one hypothesis to test.")
 
 st.subheader("Reference documents to include")
 available_documents = storage.get_documents()
@@ -81,7 +87,9 @@ raw_notes = st.text_area(
 if "flow_stage" not in st.session_state:
     st.session_state.flow_stage = "idle"
 
-start_clicked = st.button("Start", type="primary", disabled=not raw_notes.strip())
+start_clicked = st.button(
+    "Start", type="primary", disabled=not raw_notes.strip() or not selected_hypotheses
+)
 
 if start_clicked:
     st.session_state.pop("step2_result", None)
@@ -91,13 +99,17 @@ if start_clicked:
     st.session_state.pop("last_saved_interview_id", None)
     st.session_state.pop("metadata_suggestion", None)
     st.session_state.pop("metadata_saved", None)
-    # Capture the checked document set once, here, and reuse it for the
-    # Step 2 call below — so both calls in the conversation see the same
-    # reference material.
+    # Capture the checked document set and hypothesis list once, here, and
+    # reuse them for the Step 2 / digest calls below — so the whole
+    # conversation, and the later metadata-confirm digest refresh, all see
+    # the same reference material and the same hypotheses.
     st.session_state.selected_documents = selected_documents
+    st.session_state.selected_hypotheses = selected_hypotheses
     try:
         with st.spinner("Asking clarifying questions..."):
-            step1 = ai.run_step1(DEFAULT_HYPOTHESIS, raw_notes, api_key, documents=selected_documents)
+            step1 = ai.run_step1(
+                selected_hypotheses, raw_notes, api_key, documents=selected_documents
+            )
         st.session_state.step1_questions = step1["questions"]
         st.session_state.step1_history = step1["history"]
         st.session_state.flow_stage = "awaiting_answers"
@@ -140,13 +152,13 @@ if st.session_state.flow_stage in ("awaiting_answers", "done"):
             # `person=None` here — interviewee metadata isn't confirmed
             # until the form just below; the digest is refreshed with the
             # interviewee filled in right after that confirm happens.
-            digest = ai.build_digest(DEFAULT_HYPOTHESIS, analysis, raw_notes, api_key, person=None)
+            digest = ai.build_digest(selected_hypotheses, analysis, raw_notes, api_key, person=None)
             title = interview_title.strip() or default_title
             interview_id = storage.save_interview(title, raw_notes)
             document_ids = [d["id"] for d in docs_for_step2]
             run_id = storage.save_run(
                 interview_id,
-                DEFAULT_HYPOTHESIS,
+                selected_hypotheses,
                 questions,
                 answers,
                 analysis,
@@ -232,8 +244,11 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                 existing_runs = storage.get_runs_for_interview(interview_id)
                 if existing_runs:
                     latest_run = existing_runs[-1]
+                    hypotheses_for_digest = st.session_state.get(
+                        "selected_hypotheses", latest_run["hypotheses"]
+                    )
                     refreshed_digest = ai.build_digest(
-                        DEFAULT_HYPOTHESIS, latest_run["output"], raw_notes, api_key, person
+                        hypotheses_for_digest, latest_run["output"], raw_notes, api_key, person
                     )
                     storage.update_run_digest(latest_run["id"], refreshed_digest)
 
@@ -253,6 +268,9 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
     export_doc_titles = storage.get_document_titles(export_run.get("document_ids", []))
     export_header = build_export_header(export_interview, export_person, export_run, export_doc_titles)
 
+    hypotheses_display = "; ".join(
+        st.session_state.get("selected_hypotheses", [])
+    ) or export_run.get("hypothesis_text", "")
     render_analysis(
-        st.session_state.step2_result, DEFAULT_HYPOTHESIS, export_header=export_header
+        st.session_state.step2_result, hypotheses_display, export_header=export_header
     )

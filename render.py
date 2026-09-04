@@ -13,14 +13,45 @@ that page's UI as a side effect.
 
 import streamlit as st
 
-# The one hardcoded sample hypothesis for Step 2/3. Hypothesis
-# management/selection comes in Step 4; both the Process Interview page
-# and the Interviews page's rerun control use this as their default.
-DEFAULT_HYPOTHESIS = (
-    "Junior intelligence analysts spend more than 2 hours per day manually "
-    "reformatting data between disconnected tools, and would adopt a "
-    "solution that automates cross-tool data transfer."
-)
+
+def _flatten_hypothesis_tree(nodes: list[dict], depth: int = 0) -> list[tuple[dict, int]]:
+    """Flatten a hypothesis tree (as returned by storage.get_hypothesis_tree)
+    into a depth-first list of (node, depth) pairs, preserving the tree's
+    own sort order. Depth is used purely for display indentation."""
+    flat = []
+    for node in nodes:
+        flat.append((node, depth))
+        flat.extend(_flatten_hypothesis_tree(node["children"], depth + 1))
+    return flat
+
+
+def render_hypothesis_picker(tree: list[dict], key_prefix: str) -> list[str]:
+    """Render one checkbox per hypothesis in the tree, indented by depth,
+    active nodes pre-checked and dormant nodes available but unchecked —
+    and return the statement text of every checked node, in tree order.
+
+    Shared by the Process Interview page and the Interviews page's rerun
+    control so selecting one or more hypotheses to test looks and behaves
+    identically everywhere. `key_prefix` must be unique per call site
+    (e.g. per-interview on the rerun control) so widget keys don't clash.
+    """
+    flat = _flatten_hypothesis_tree(tree)
+    if not flat:
+        st.caption("No hypotheses yet — add some on the Hypotheses page.")
+        return []
+    selected = []
+    for node, depth in flat:
+        indent = " " * 4 * depth
+        suffix = "  _(dormant)_" if node["state"] == "dormant" else ""
+        label = f"{indent}{node['text']}{suffix}"
+        checked = st.checkbox(
+            label,
+            value=(node["state"] == "active"),
+            key=f"{key_prefix}_{node['id']}",
+        )
+        if checked:
+            selected.append(node["text"])
+    return selected
 
 
 def _md_cell(text: str) -> str:
