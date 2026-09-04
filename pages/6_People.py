@@ -2,10 +2,13 @@
 pages/6_People.py — Browsable table of everyone interviewed. Selecting a
 person shows their editable metadata plus their linked interview(s) and
 each interview's runs (reusing the same table rendering as elsewhere).
+Also offers a one-click Excel export of the (filtered) roster — see
+people_export.build_people_excel.
 """
 
 import streamlit as st
 
+import people_export
 import storage
 from render import build_export_header, render_analysis
 
@@ -72,6 +75,14 @@ st.caption("Click a column header above to sort.")
 if not filtered_people:
     st.info("No people match the current filters.")
     st.stop()
+
+st.download_button(
+    "📊 Export to Excel",
+    data=people_export.build_people_excel(filtered_people),
+    file_name="people.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Downloads the table above (respecting the filters set here) as a .xlsx file.",
+)
 
 st.divider()
 st.subheader("View / edit a person")

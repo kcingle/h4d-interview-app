@@ -46,8 +46,10 @@ and past runs — works with no key.
   text-extraction step, no extra dependency.
 - **People** — browsable/filterable/sortable table of everyone
   interviewed (name, role, organization, rank, branch/service, seniority,
-  relationship, interview status, date, descriptor), with an editable
-  form per person and their linked interview(s)/runs (also exportable).
+  relationship, interview status, date, descriptor), with a one-click
+  **Export to Excel** button (respects the filters set on this page,
+  `people_export.py`), an editable form per person, and their linked
+  interview(s)/runs (also exportable).
 - **Hypothesis Status** — select a hypothesis and see every interview
   that tested it, rolled up from digests (never full transcripts):
   mechanical validated/invalidated/untested counts, each interview's
@@ -94,6 +96,10 @@ and past runs — works with no key.
   value tied to a widget's `key=` (like the Settings page's input) is
   only kept in session_state while that widget is being rendered —
   reading the file directly is what makes every page see the same key.
+- `people_export.py` — builds the People page's Excel export
+  (`build_people_excel`). A plain function with no Streamlit dependency,
+  so it's directly unit-testable; the page just calls it and hands the
+  bytes to `st.download_button`.
 - `h4d_app.db` — the SQLite database file. Created automatically the
   first time the app runs; gitignored (never committed — see Backups
   below).
