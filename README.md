@@ -34,7 +34,12 @@ and past runs — works with no key.
   hypotheses without losing earlier runs.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, toggle active/dormant. Nothing is ever
-  deleted.
+  deleted. Nothing is ever auto-added either — a brand-new database
+  starts with an empty tree; every hypothesis is one you (or an
+  AI-suggest-and-approve flow, once built) added on purpose. Two view
+  modes: **List (edit)** for all of the above, and **Visual tree** — a
+  real clickable expand/collapse diagram (plain HTML, no new dependency)
+  for browsing the tree read-only.
 - **Documents** — upload (.txt, .md, or .pdf) or paste reference
   documents the analysis engine can use as context. Includes a
   permanent, protected pinned slot for the Mom Test book PDF (upload it

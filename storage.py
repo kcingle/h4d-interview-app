@@ -113,7 +113,6 @@ def init_db() -> None:
         _migrate_people_table(conn)
         _migrate_documents_table(conn)
         _cleanup_dead_schema_v1(conn)
-        _seed_hypotheses_if_empty(conn)
         _seed_mom_test_document_if_missing(conn)
         _replace_mom_test_text_with_pdf_slot(conn)
         _seed_people_if_empty(conn)
@@ -162,62 +161,6 @@ def _migrate_hypotheses_table(conn: sqlite3.Connection) -> None:
 # Delete this function and its call above to remove the seed tree entirely.
 # It only ever fires when the hypotheses table is completely empty, and
 # never overwrites or touches existing hypotheses.
-def _seed_hypotheses_if_empty(conn: sqlite3.Connection) -> None:
-    count = conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0]
-    if count:
-        return
-
-    def insert(parent_id, label, text, state):
-        conn.execute(
-            "INSERT INTO hypotheses (statement, label, state, parent_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (text, label, state, parent_id, _now()),
-        )
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-    root1 = insert(
-        None, "1",
-        "Dismounted patrol units in comms-denied environments lose more than "
-        "15 minutes per mission re-establishing position after GPS-denial events.",
-        "active",
-    )
-    insert(
-        root1, "1a",
-        "Dismounted patrol units in comms-denied environments would adopt a "
-        "low-cost inertial+visual dead-reckoning aid that requires no network "
-        "connectivity.",
-        "active",
-    )
-    insert(
-        root1, "1b",
-        "Dismounted patrol units in comms-denied environments would adopt a "
-        "solution requiring periodic satellite check-ins every 30 minutes.",
-        "dormant",
-    )
-
-    root2 = insert(
-        None, "2",
-        "Small unit leaders cannot verify subordinate element positions during "
-        "comms-denied operations without physically consolidating the formation.",
-        "active",
-    )
-    insert(
-        root2, "2a",
-        "Small unit leaders would adopt a peer-to-peer mesh position-sharing "
-        "capability that operates without external infrastructure, even during "
-        "comms-denied operations.",
-        "active",
-    )
-
-    insert(
-        None, "3",
-        "Route planners preparing for comms-denied operations lack a reliable "
-        "way to pre-stage waypoints that account for terrain-masking of "
-        "degraded PNT signals.",
-        "dormant",
-    )
-
-
 # --- SEED DATA (Step 5 pinned Mom Test doc) ---------------------------------
 # Only fires when no pinned document exists yet; never overwrites existing
 # documents. The pinned slot is now an empty PDF placeholder — upload the
