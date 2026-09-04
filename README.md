@@ -60,8 +60,10 @@ and past runs — works with no key.
   Status, this only retrieves and organizes what was already said —
   never an AI-written "here's the contrast" summary.
 - **Chat** — placeholder; planned for a later step.
-- **Settings** — enter your Anthropic API key (kept only in the browser
-  session, not saved to disk).
+- **Settings** — enter your Anthropic API key. Saved locally to a `.env`
+  file next to the app (gitignored — never committed, see `env_store.py`),
+  so every page that calls the API sees the same key, and it survives
+  restarting the app.
 
 ## Architecture
 
@@ -81,6 +83,14 @@ and past runs — works with no key.
 - `render.py` — shared table/markdown rendering for a run's output, used
   by every page that displays one, so results look identical everywhere.
 - `config.py` — model name / API version.
+- `env_store.py` — local persistence for the Anthropic API key, via a
+  `.env` file next to the app (gitignored, separate from the SQLite
+  database on purpose — a secret shouldn't live in a database that might
+  later be shared/hosted). Every page reads the key with
+  `env_store.load_api_key()` rather than `st.session_state`, since a
+  value tied to a widget's `key=` (like the Settings page's input) is
+  only kept in session_state while that widget is being rendered —
+  reading the file directly is what makes every page see the same key.
 - `h4d_app.db` — the SQLite database file. Created automatically the
   first time the app runs; gitignored (never committed — see Backups
   below).
@@ -153,8 +163,8 @@ Use the sidebar to navigate between pages.
 
 1. Get an Anthropic API key from console.anthropic.com (separate from a
    claude.ai chat subscription — it's pay-per-use, billed by usage).
-2. Go to the **Settings** page and paste it in. It's kept only in this
-   browser session, not written to disk.
+2. Go to the **Settings** page and paste it in. It's saved to a local
+   `.env` file (gitignored) so you only need to enter it once, ever.
 3. Go to **Process Interview** to run a real analysis, or **Interviews**
    to rerun a saved one against a different hypothesis.
 

@@ -7,6 +7,7 @@ different hypothesis, which adds a brand-new run alongside the old ones.
 import streamlit as st
 
 import ai
+import env_store
 import storage
 from render import build_export_header, render_analysis, render_hypothesis_picker
 
@@ -48,7 +49,7 @@ st.subheader("Past runs")
 runs = storage.get_runs_for_interview(selected["id"])
 # Step 7: same person for every run of this interview — look up once.
 interview_person = storage.get_person_for_interview(selected["id"])
-digest_api_key = st.session_state.get("api_key", "")
+digest_api_key = env_store.load_api_key()
 
 if not runs:
     st.write("No runs yet for this interview.")
@@ -97,7 +98,7 @@ st.caption(
     "earlier runs are kept."
 )
 
-api_key = st.session_state.get("api_key", "")
+api_key = env_store.load_api_key()
 if not api_key:
     st.warning("No Anthropic API key set yet. Enter one on the **Settings** page first.")
 

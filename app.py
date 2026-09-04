@@ -19,6 +19,7 @@ import datetime
 import streamlit as st
 
 import ai
+import env_store
 import storage  # noqa: F401  (importing this ensures the SQLite DB/tables exist)
 from render import build_export_header, render_analysis, render_hypothesis_picker
 
@@ -30,7 +31,7 @@ st.set_page_config(page_title="H4D Interview App — Process Interview", page_ic
 st.title("Process Interview")
 st.caption("Paste raw interview notes, then run the two-step AI analysis below.")
 
-api_key = st.session_state.get("api_key", "")
+api_key = env_store.load_api_key()
 if not api_key:
     st.warning(
         "No Anthropic API key set yet. Enter one on the **Settings** page, then come back here."
