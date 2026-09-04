@@ -38,6 +38,9 @@ st.subheader(selected["title"])
 st.caption(f"Saved {selected['created_at']}")
 with st.expander("Raw interview notes"):
     st.text(selected["raw_text"])
+if selected.get("notes"):
+    with st.expander("Additional notes"):
+        st.text(selected["notes"])
 
 st.divider()
 st.subheader("Past runs")
@@ -80,6 +83,7 @@ else:
                     selected["raw_text"],
                     digest_api_key,
                     interview_person,
+                    additional_notes=selected.get("notes") or "",
                 )
                 storage.update_run_digest(run["id"], new_digest)
                 st.success("Digest regenerated.")
@@ -116,7 +120,12 @@ if st.button(
 ):
     try:
         with st.spinner("Asking clarifying questions..."):
-            step1 = ai.run_step1(rerun_hypotheses, selected["raw_text"], api_key)
+            step1 = ai.run_step1(
+                rerun_hypotheses,
+                selected["raw_text"],
+                api_key,
+                additional_notes=selected.get("notes") or "",
+            )
         st.session_state[f"rerun_questions_{interview_id}"] = step1["questions"]
         st.session_state[f"rerun_history_{interview_id}"] = step1["history"]
         st.session_state[f"rerun_hypotheses_used_{interview_id}"] = rerun_hypotheses
@@ -144,7 +153,12 @@ if st.session_state[rerun_stage_key] == "awaiting_answers":
                 analysis = ai.run_step2(rerun_history, rerun_questions, rerun_answers, api_key)
             hypotheses_used = st.session_state[f"rerun_hypotheses_used_{interview_id}"]
             digest = ai.build_digest(
-                hypotheses_used, analysis, selected["raw_text"], api_key, interview_person
+                hypotheses_used,
+                analysis,
+                selected["raw_text"],
+                api_key,
+                interview_person,
+                additional_notes=selected.get("notes") or "",
             )
             # Step 5: no document checklist on this rerun control yet
             # (only the Process Interview page has one) — record an empty

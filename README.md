@@ -19,7 +19,9 @@ and past runs — works with no key.
 
 - **Process Interview** (`app.py`, the home page) — check off one or more
   hypotheses from the tree to test this run (active ones pre-checked),
-  pick reference documents to include, paste interview notes, run the
+  pick reference documents to include, paste interview notes plus
+  optional Additional Notes (nonverbal communication, tone, the setting,
+  or anything else observed but not written as dialogue), run the
   two-step AI flow (clarifying questions, then the full analysis), review
   results as tables, and confirm interviewee metadata. Saves automatically.
 - **Interviews** — browse every saved interview, review all of its past
@@ -94,11 +96,12 @@ metadata is confirmed), each hypothesis's verdict with its verbatim
 evidence quote(s), key pains/gains with their verbatim quotes, a short
 list of topic tags, and the claims-to-verify list.
 
-**Every quote is checked against that interview's actual raw text before
-being kept** — an unverifiable or fabricated quote is dropped, not
-included, matching the same anti-fabrication rule as the main analysis.
-Topic tags are the one part that needs an API key (a small, separate,
-non-crashing call); everything else works with no key.
+**Every quote is checked against that interview's actual raw text (plus
+its optional Additional Notes, if any) before being kept** — an
+unverifiable or fabricated quote is dropped, not included, matching the
+same anti-fabrication rule as the main analysis. Topic tags are the one
+part that needs an API key (a small, separate, non-crashing call);
+everything else works with no key.
 
 A run processed before this existed has an old, thin digest — the
 Interviews page shows this and offers a **Regenerate digest** button,

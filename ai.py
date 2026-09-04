@@ -304,7 +304,11 @@ def _extract_json(response) -> dict:
 
 
 def run_step1(
-    hypotheses: list[str], raw_notes: str, api_key: str, documents: list[dict] | None = None
+    hypotheses: list[str],
+    raw_notes: str,
+    api_key: str,
+    documents: list[dict] | None = None,
+    additional_notes: str = "",
 ) -> dict:
     """Step 1: ask up to three clarifying questions about the interview.
 
@@ -312,6 +316,13 @@ def run_step1(
     graded SYSTEM_PROMPT above already says "one or more hypotheses"; the
     app just lists every one of them in the user message below (the
     prompt text itself never changes based on how many there are).
+
+    `additional_notes` (optional): free-form context the interviewer typed
+    separately from the transcript — nonverbal communication, tone, the
+    setting, or anything else observed but not written as dialogue. Appended
+    to the user message as its own clearly-labeled section (never merged
+    into `raw_notes` itself, so the interview's stored transcript stays
+    exactly what was actually said).
 
     `documents` (Step 5, optional): reference documents to include as
     context — each a dict with at least "title", "content", and
@@ -329,6 +340,13 @@ def run_step1(
         f"Hypotheses being tested:\n{hypotheses_block}\n\n"
         f"Raw interview notes:\n{raw_notes}"
     )
+    if additional_notes and additional_notes.strip():
+        user_text += (
+            "\n\nAdditional notes from the interviewer (not part of the "
+            "transcript — e.g. nonverbal communication, tone, body language, "
+            "the setting, or other context observed during the interview):\n"
+            f"{additional_notes.strip()}"
+        )
     user_content = _build_user_message_content(user_text, documents)
     response = _call(
         client,
@@ -563,6 +581,7 @@ def build_digest(
     raw_notes: str,
     api_key: str = "",
     person: dict | None = None,
+    additional_notes: str = "",
 ) -> dict:
     """Build the rich, quote-anchored digest for one processed run.
     Derived mostly from the already-computed Step 2 `analysis` — no full
@@ -588,7 +607,17 @@ def build_digest(
     Often not yet known when a run is first saved (metadata confirmation
     happens right after) — pass None then, and call this again once
     confirmed to refresh the digest's interviewee field.
+
+    `additional_notes` (optional): the same interviewer-supplied context
+    passed to run_step1 (see there). Included alongside raw_notes as
+    source text for the verbatim-quote check below — a quote the model
+    pulls from these notes (not just the transcript) is real, interviewer-
+    written text, not a fabrication, so it still counts as verified.
     """
+    verification_text = raw_notes
+    if additional_notes and additional_notes.strip():
+        verification_text = f"{raw_notes}\n\n{additional_notes.strip()}"
+
     ledger = analysis.get("hypothesis_ledger", [])
     hypotheses_digest = []
     for i, hypothesis_text in enumerate(hypotheses):
@@ -598,7 +627,7 @@ def build_digest(
                 "hypothesis": hypothesis_text,
                 "claim": row.get("claim", ""),
                 "status": row.get("status", "Untested"),
-                "quotes": _extract_verified_quotes(row.get("evidence", ""), raw_notes),
+                "quotes": _extract_verified_quotes(row.get("evidence", ""), verification_text),
             })
         else:
             # The model produced fewer ledger rows than hypotheses tested —
@@ -610,7 +639,7 @@ def build_digest(
     pains, gains = [], []
     for row in analysis.get("pains_and_gains", []):
         quote = row.get("verbatim_quote", "")
-        if not _quote_appears_in_notes(quote, raw_notes):
+        if not _quote_appears_in_notes(quote, verification_text):
             continue  # unverified — dropped, not propagated
         entry = {
             "what": row.get("what_it_is", ""),

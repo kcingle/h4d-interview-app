@@ -84,6 +84,17 @@ raw_notes = st.text_area(
     placeholder="Paste the interview transcript or notes here...",
 )
 
+additional_notes = st.text_area(
+    "Additional Notes (optional)",
+    height=120,
+    key="additional_notes",
+    placeholder=(
+        "Anything not captured in the transcript above — nonverbal "
+        "communication, tone, body language, the room/setting, or "
+        "anything else you noticed but didn't write down as dialogue."
+    ),
+)
+
 if "flow_stage" not in st.session_state:
     st.session_state.flow_stage = "idle"
 
@@ -108,7 +119,11 @@ if start_clicked:
     try:
         with st.spinner("Asking clarifying questions..."):
             step1 = ai.run_step1(
-                selected_hypotheses, raw_notes, api_key, documents=selected_documents
+                selected_hypotheses,
+                raw_notes,
+                api_key,
+                documents=selected_documents,
+                additional_notes=additional_notes,
             )
         st.session_state.step1_questions = step1["questions"]
         st.session_state.step1_history = step1["history"]
@@ -152,9 +167,16 @@ if st.session_state.flow_stage in ("awaiting_answers", "done"):
             # `person=None` here — interviewee metadata isn't confirmed
             # until the form just below; the digest is refreshed with the
             # interviewee filled in right after that confirm happens.
-            digest = ai.build_digest(selected_hypotheses, analysis, raw_notes, api_key, person=None)
+            digest = ai.build_digest(
+                selected_hypotheses,
+                analysis,
+                raw_notes,
+                api_key,
+                person=None,
+                additional_notes=additional_notes,
+            )
             title = interview_title.strip() or default_title
-            interview_id = storage.save_interview(title, raw_notes)
+            interview_id = storage.save_interview(title, raw_notes, notes=additional_notes)
             document_ids = [d["id"] for d in docs_for_step2]
             run_id = storage.save_run(
                 interview_id,
@@ -248,7 +270,12 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                         "selected_hypotheses", latest_run["hypotheses"]
                     )
                     refreshed_digest = ai.build_digest(
-                        hypotheses_for_digest, latest_run["output"], raw_notes, api_key, person
+                        hypotheses_for_digest,
+                        latest_run["output"],
+                        raw_notes,
+                        api_key,
+                        person,
+                        additional_notes=additional_notes,
                     )
                     storage.update_run_digest(latest_run["id"], refreshed_digest)
 
