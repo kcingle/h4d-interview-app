@@ -4,9 +4,11 @@ home page: pick which reference documents to include, paste raw interview
 notes, run the two-step AI analysis, and review the results as real
 tables. On completion the interview and this first run are saved
 automatically (Step 3), followed by a suggest-and-confirm interviewee
-metadata form (Step 6) — nothing is saved there until you confirm. Reruns
-against a different hypothesis happen from the Interviews page instead.
-Run with:
+metadata form (Step 6) — nothing is saved there until you confirm.
+Confirming metadata hands off straight to the Interviews page for this
+one interview (pre-selected, its one run auto-expanded) instead of
+showing the results a second time inline here. Reruns against a
+different hypothesis happen from the Interviews page instead. Run with:
 
     streamlit run app.py
 
@@ -281,7 +283,24 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                     storage.update_run_digest(latest_run["id"], refreshed_digest)
 
                 st.session_state.metadata_saved = True
-                st.rerun()
+
+                # Hand off to the Interviews page for this one interview —
+                # that's where the full synthesis (Mom Test audit,
+                # pains/gains, hypothesis ledger, sharper questions, Slack
+                # write-up, digest) lives for browsing/rerunning later, and
+                # it's scoped to just this interview rather than showing it
+                # a second time inline here. Pre-select it (by id, not by
+                # assuming index 0, in case ordering ever changes) and flag
+                # it so that page auto-expands its one run instead of
+                # requiring an extra click right after you just finished it.
+                interviews_after_save = storage.get_interviews()
+                target_idx = next(
+                    (i for i, iv in enumerate(interviews_after_save) if iv["id"] == interview_id),
+                    0,
+                )
+                st.session_state["interviews_selectbox"] = target_idx
+                st.session_state["just_processed_interview_id"] = interview_id
+                st.switch_page("pages/1_Interviews.py")
 
     st.divider()
     st.header("Analysis results")

@@ -23,7 +23,10 @@ and past runs — works with no key.
   optional Additional Notes (nonverbal communication, tone, the setting,
   or anything else observed but not written as dialogue), run the
   two-step AI flow (clarifying questions, then the full analysis), review
-  results as tables, and confirm interviewee metadata. Saves automatically.
+  results as tables, and confirm interviewee metadata. Saves automatically,
+  and confirming metadata takes you straight to the Interviews page for
+  that one interview (pre-selected, its run already expanded) instead of
+  showing the results a second time on this page.
 - **Interviews** — browse every saved interview, review all of its past
   runs (each kept forever, each exportable to Markdown/.txt with a
   provenance header), inspect or regenerate that run's structured digest

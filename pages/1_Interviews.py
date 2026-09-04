@@ -51,12 +51,21 @@ runs = storage.get_runs_for_interview(selected["id"])
 interview_person = storage.get_person_for_interview(selected["id"])
 digest_api_key = env_store.load_api_key()
 
+# Set by Process Interview right before it hands off here after you finish
+# and confirm metadata for a brand-new interview — auto-expand that one
+# run so the synthesis is visible immediately, no extra click needed.
+# Popped (not just read) so this only fires once, on the landing view.
+just_processed_id = st.session_state.pop("just_processed_interview_id", None)
+
 if not runs:
     st.write("No runs yet for this interview.")
 else:
     for i, run in enumerate(runs, start=1):
         when = run["created_at"][:19].replace("T", " ")
-        with st.expander(f"Run {i} — hypothesis: {run['hypothesis_text']} — {when}"):
+        auto_expand = just_processed_id == selected["id"] and i == len(runs)
+        with st.expander(
+            f"Run {i} — hypothesis: {run['hypothesis_text']} — {when}", expanded=auto_expand
+        ):
             export_header = build_export_header(
                 selected, interview_person, run, storage.get_document_titles(run["document_ids"])
             )
