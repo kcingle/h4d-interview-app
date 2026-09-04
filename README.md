@@ -3,12 +3,12 @@
 A local Streamlit app for processing Hacking for Defense customer-discovery
 interviews. Built iteratively in small, verified steps.
 
-**Current status: through Step 7 (export).** The core two-step AI
-analysis engine, interview storage with rerun history, a hypothesis
-tree, reference documents (with a pinned Mom Test doc), interviewee
-metadata + a People view, and exporting a run to Markdown/.txt are all
-built and working. Chat and cross-interview corpus comparison are not
-built yet.
+**Current status:** the core two-step AI analysis engine, interview
+storage with rerun history, a hypothesis tree, reference documents (with
+a pinned Mom Test doc), interviewee metadata + a People view (with a
+one-click Excel export), exporting a run to Markdown/.txt,
+cross-interview corpus features (Hypothesis Status, Search & Compare),
+and a corpus-wide Chat are all built and working.
 
 **Live AI processing (Process Interview page, and the Interviews page's
 rerun control) requires an Anthropic API key**, entered on the Settings
@@ -64,7 +64,17 @@ and past runs — works with no key.
   of 2+ interviews on one hypothesis or topic tag. Like Hypothesis
   Status, this only retrieves and organizes what was already said —
   never an AI-written "here's the contrast" summary.
-- **Chat** — placeholder; planned for a later step.
+- **Chat** — a real conversation over the whole corpus, unlike Hypothesis
+  Status/Search & Compare's zero-synthesis retrieval. Every message sends
+  the full hypothesis tree, people roster, document list, and every
+  interview's raw transcript + Additional Notes + complete analysis (not
+  just its digest) as context (`ai.build_corpus_context`) — cached after
+  the first turn each session, so later turns are cheap; only the first
+  message and an explicit "Refresh context" pay full price. Answers cite
+  which interview a finding came from, and the system prompt tells the
+  model to say so plainly rather than guess when something isn't in the
+  material — verified live: it correctly declined to answer about an
+  interview that doesn't exist in the corpus.
 - **Settings** — enter your Anthropic API key. Saved locally to a `.env`
   file next to the app (gitignored — never committed, see `env_store.py`),
   so every page that calls the API sees the same key, and it survives
@@ -77,7 +87,10 @@ and past runs — works with no key.
   these in the sidebar automatically (numeric prefixes control order and
   are stripped from the displayed name).
 - `ai.py` — **all** AI/LLM logic. Pages never call an AI API directly.
-  Holds the exact graded system prompt (verbatim, never edited).
+  Holds the exact graded system prompt (verbatim, never edited), plus a
+  separate, unrelated system prompt for Chat (`CHAT_SYSTEM_INSTRUCTIONS`)
+  and `build_corpus_context`, which formats everything the rest of the
+  app knows into one text blob for Chat to send as context.
 - `storage.py` — **all** persistence, backed by SQLite, behind simple
   named functions (`save_interview`, `get_interviews`, ...). If the
   backend is ever swapped to a hosted database, only this file changes.
@@ -202,5 +215,6 @@ needed) from a file in `backups/` instead.
 
 ## What's next
 
-Chat and cross-interview corpus comparison are not built yet. Each step
-is built and verified before the next begins.
+Every planned feature is built. Ongoing work happens as small, verified
+changes on top of what's here (see git history for the shape each one
+took).

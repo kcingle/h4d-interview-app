@@ -19,6 +19,11 @@ import re
 import anthropic
 
 import config
+import render  # only for build_markdown_report, reused by build_corpus_context
+# below so the Chat page's per-run context matches the exact same
+# Mom Test/pains-and-gains/hypothesis-ledger/etc. formatting the rest of
+# the app already shows. render.py makes no persistence or AI calls of
+# its own, so this doesn't create a cycle back into this module.
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -270,17 +275,22 @@ def _client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
-def _call(client: anthropic.Anthropic, messages: list[dict], schema: dict, system):
-    """Shared call wrapper: same model/schema plumbing, one error-handling
-    chain for both steps of the flow."""
+def _call(
+    client: anthropic.Anthropic,
+    messages: list[dict],
+    system,
+    schema: dict | None = None,
+    max_tokens: int = 8000,
+):
+    """Shared call wrapper: same model plumbing, one error-handling chain
+    for every call site. `schema` (optional) adds output_config for a
+    structured-output call (the two-step analysis); omit it for a
+    free-form text call (chat)."""
+    kwargs = dict(model=config.MODEL_NAME, max_tokens=max_tokens, system=system, messages=messages)
+    if schema is not None:
+        kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
     try:
-        return client.messages.create(
-            model=config.MODEL_NAME,
-            max_tokens=8000,
-            system=system,
-            messages=messages,
-            output_config={"format": {"type": "json_schema", "schema": schema}},
-        )
+        return client.messages.create(**kwargs)
     except anthropic.AuthenticationError:
         raise AIError(
             "Your Anthropic API key was rejected. Check it on the Settings page."
@@ -304,6 +314,13 @@ def _extract_json(response) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         raise AIError("The AI response could not be parsed as JSON.")
+
+
+def _extract_text(response) -> str:
+    try:
+        return next(block.text for block in response.content if block.type == "text")
+    except StopIteration:
+        raise AIError("The AI response didn't contain any text.")
 
 
 # ---------------------------------------------------------------------------
@@ -692,3 +709,179 @@ def build_digest(
         "topics": _suggest_topics(hypotheses, analysis, api_key),
         "claims_to_verify": list(analysis.get("claims_to_verify", [])),
     }
+
+
+# ---------------------------------------------------------------------------
+# Chat — talks about the WHOLE corpus, not one interview. A different kind
+# of feature from everything above: Hypothesis Status and Search & Compare
+# deliberately do zero AI synthesis (pure retrieval), but a chat is
+# inherently synthesis. The anti-fabrication rule still applies, just
+# enforced through the system prompt's instructions (cite the interview a
+# claim comes from; say so when something isn't in the material) rather
+# than a verbatim-quote check on free-form conversational text, since
+# there's no fixed "evidence" field here to check the way there is for a
+# hypothesis ledger row.
+# ---------------------------------------------------------------------------
+
+CHAT_SYSTEM_INSTRUCTIONS = (
+    "You are a research assistant helping a Hacking for Defense (H4D) "
+    "student team review everything they've learned across their DoD "
+    "customer-discovery interviews. Below this message is the team's "
+    "complete hypothesis tree, their interviewee roster, their reference "
+    "document list, and — for every interview logged so far — its raw "
+    "transcript, any additional interviewer notes, and the full analysis "
+    "produced for every run against it (Mom Test audit, pains and gains, "
+    "hypothesis ledger, sharper questions, and Slack write-up).\n\n"
+    "Answer ONLY from this material. When you state a finding, name which "
+    "interview it comes from (its title and/or date) so the team can "
+    "trace it back. If something the team asks about isn't covered by "
+    "this material, say so plainly instead of guessing — never invent a "
+    "quote, a number, or a finding that isn't actually below. You may "
+    "synthesize across multiple interviews (spot a pattern, count how "
+    "many validated a hypothesis, compare two interviewees) as long as "
+    "every individual claim inside that synthesis still traces back to a "
+    "specific interview."
+)
+
+
+def _flatten_hypotheses_for_context(nodes: list[dict], depth: int = 0) -> list[tuple[dict, int]]:
+    """Same depth-first flatten as render._flatten_hypothesis_tree, kept
+    as its own copy here rather than importing that (leading-underscore,
+    render-specific) helper — this one is a plain data transform with no
+    Streamlit involved, appropriate to live with the rest of ai.py's
+    context-building code."""
+    flat = []
+    for node in nodes:
+        flat.append((node, depth))
+        flat.extend(_flatten_hypotheses_for_context(node.get("children", []), depth + 1))
+    return flat
+
+
+def build_corpus_context(
+    hypotheses_tree: list[dict],
+    interviews: list[dict],
+    people: list[dict],
+    documents: list[dict],
+) -> str:
+    """Build one large text blob covering everything else in the app
+    knows, for the Chat page to send as a (cached) system block on every
+    turn: the hypothesis tree, the people roster, the reference document
+    list, and every interview's raw transcript + Additional Notes + full
+    analysis for each of its runs — reusing render.build_markdown_report
+    so the exact same Mom Test audit / pains-and-gains / hypothesis
+    ledger / sharper questions / Slack write-up formatting the rest of
+    the app already shows appears here too.
+
+    `interviews`: each dict from storage.get_interviews(), augmented by
+    the caller with "person" (storage.get_person_for_interview) and
+    "runs" (storage.get_runs_for_interview) — this function only reads
+    and formats them, never touches storage itself.
+
+    Never raises; a missing/blank field renders as "(none)" / "Not
+    recorded" rather than crashing chat setup.
+    """
+    lines = ["=== HYPOTHESIS TREE ==="]
+    flat_hyps = _flatten_hypotheses_for_context(hypotheses_tree)
+    if not flat_hyps:
+        lines.append("(no hypotheses logged yet)")
+    for node, depth in flat_hyps:
+        indent = "  " * depth
+        state_tag = "dormant" if node.get("state") == "dormant" else "active"
+        lines.append(f"{indent}{node.get('label', '?')} [{state_tag}]: {node.get('text', '')}")
+    lines.append("")
+
+    lines.append("=== PEOPLE ROSTER ===")
+    if not people:
+        lines.append("(no interviewee metadata recorded yet)")
+    for p in people:
+        bits = [p.get("name") or "(unnamed)"]
+        role_org = ", ".join(x for x in [p.get("role"), p.get("organization")] if x)
+        if role_org:
+            bits.append(f"({role_org})")
+        rank_branch = ", ".join(x for x in [p.get("rank"), p.get("branch_service")] if x)
+        if rank_branch:
+            bits.append(f"[{rank_branch}]")
+        if p.get("relationship"):
+            bits.append(f"relationship: {p['relationship']}")
+        if p.get("interview_status"):
+            bits.append(f"status: {p['interview_status']}")
+        if p.get("interview_date"):
+            bits.append(f"date: {p['interview_date']}")
+        if p.get("descriptor"):
+            bits.append(f"— {p['descriptor']}")
+        lines.append("- " + " ".join(bits))
+    lines.append("")
+
+    lines.append("=== REFERENCE DOCUMENTS ON FILE ===")
+    if not documents:
+        lines.append("(none uploaded yet)")
+    for d in documents:
+        pin = "📌 " if d.get("is_pinned") else ""
+        lines.append(f"- {pin}{d.get('title', '(untitled)')}")
+    lines.append("")
+
+    lines.append("=== INTERVIEWS ===")
+    if not interviews:
+        lines.append("(no interviews logged yet)")
+    for interview in interviews:
+        lines.append("")
+        title = interview.get("title", "(untitled)")
+        when = interview.get("created_at", "")
+        lines.append(f'--- Interview: "{title}" (saved {when}) ---')
+
+        person = interview.get("person")
+        if person:
+            label = (person.get("name") or "").strip() or "(unnamed)"
+            sub = ", ".join(x for x in [person.get("role"), person.get("organization")] if x)
+            lines.append(f"Interviewee: {label}" + (f" ({sub})" if sub else ""))
+        else:
+            lines.append("Interviewee: Not recorded.")
+
+        additional_notes = (interview.get("notes") or "").strip()
+        lines.append(
+            "Additional notes (nonverbal/context observed by the interviewer, "
+            "NOT part of the transcript):"
+        )
+        lines.append(additional_notes if additional_notes else "(none)")
+
+        lines.append("Raw transcript:")
+        lines.append(interview.get("raw_text") or "(empty)")
+
+        runs = interview.get("runs") or []
+        if not runs:
+            lines.append("(no runs processed for this interview yet)")
+        for i, run in enumerate(runs, start=1):
+            hyps_display = "; ".join(run.get("hypotheses") or [run.get("hypothesis_text", "")])
+            run_when = run.get("created_at", "")
+            lines.append("")
+            lines.append(f"[Run {i} — {run_when} — hypotheses tested: {hyps_display}]")
+            lines.append(render.build_markdown_report(run.get("output") or {}, hyps_display))
+
+    return "\n".join(lines)
+
+
+def run_chat(
+    history: list[dict], user_message: str, api_key: str, corpus_context: str
+) -> dict:
+    """One chat turn. `history` is every prior turn this session (a list
+    of {"role", "content"} dicts, user/assistant alternating — exactly
+    the shape the Anthropic API expects, since the caller stores and
+    replays this list as-is). `corpus_context` (see build_corpus_context)
+    is sent as a cached system block, so later turns in the same session
+    don't re-pay its full cost — only its first use, and any explicit
+    refresh, cost full price.
+
+    Returns {"reply": str, "history": [...]} — `history` already
+    includes this turn (both the user message and the reply), ready to
+    pass back in as-is on the next call.
+    """
+    client = _client(api_key)
+    system = [{
+        "type": "text",
+        "text": f"{CHAT_SYSTEM_INSTRUCTIONS}\n\n{corpus_context}",
+        "cache_control": {"type": "ephemeral"},
+    }]
+    messages = history + [{"role": "user", "content": user_message}]
+    response = _call(client, messages=messages, system=system, max_tokens=4096)
+    reply = _extract_text(response)
+    return {"reply": reply, "history": messages + [{"role": "assistant", "content": reply}]}
