@@ -149,7 +149,12 @@ CLARIFYING_QUESTIONS_SCHEMA = {
         "questions": {
             "type": "array",
             "items": {"type": "string"},
-            "maxItems": 3,
+            # No "maxItems" here — Claude's structured-output schema doesn't
+            # support array size constraints (a live call with one returns a
+            # 400: "For 'array' type, property 'maxItems' is not
+            # supported"). The "up to three" limit is already in
+            # SYSTEM_PROMPT's instructions; run_step1 below also truncates
+            # to 3 in code as a safety net, never padding if there are fewer.
         }
     },
     "required": ["questions"],
@@ -213,8 +218,11 @@ ANALYSIS_SCHEMA = {
         "sharper_questions": {
             "type": "array",
             "items": {"type": "string"},
-            "minItems": 3,
-            "maxItems": 3,
+            # No "minItems"/"maxItems" — same unsupported-keyword issue as
+            # CLARIFYING_QUESTIONS_SCHEMA above. SYSTEM_PROMPT already asks
+            # for exactly three; run_step2 below truncates to 3 in code if
+            # the model ever returns more, and leaves it alone (never pads)
+            # if it returns fewer.
         },
         "slack_writeup": {
             "type": "object",
@@ -357,8 +365,13 @@ def run_step1(
     data = _extract_json(response)
     assistant_text = next(b.text for b in response.content if b.type == "text")
 
+    # Enforce "up to three" in code — the schema itself can't (see
+    # CLARIFYING_QUESTIONS_SCHEMA above). Truncate only; never pad if the
+    # model returns fewer than three.
+    questions = list(data.get("questions", []))[:3]
+
     return {
-        "questions": data.get("questions", []),
+        "questions": questions,
         "history": [
             {"role": "user", "content": user_content},
             {"role": "assistant", "content": assistant_text},
@@ -393,7 +406,14 @@ def run_step2(
     response = _call(
         client, messages=messages, schema=ANALYSIS_SCHEMA, system=_build_system(documents)
     )
-    return _extract_json(response)
+    data = _extract_json(response)
+
+    # Enforce "exactly three" sharper questions in code — the schema
+    # itself can't (see ANALYSIS_SCHEMA above). Truncate only; never pad
+    # with invented questions if the model returns fewer than three.
+    data["sharper_questions"] = list(data.get("sharper_questions", []))[:3]
+
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +520,10 @@ _TOPIC_TAGS_SYSTEM_PROMPT = (
 _TOPIC_TAGS_SCHEMA = {
     "type": "object",
     "properties": {
-        "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+        # No "maxItems" — same unsupported-keyword issue as the schemas
+        # above. The system prompt already asks for 3 to 8 tags;
+        # _suggest_topics below truncates to 8 in code as a safety net.
+        "topics": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["topics"],
     "additionalProperties": False,
@@ -536,7 +559,10 @@ def _suggest_topics(hypotheses: list[str], analysis: dict, api_key: str) -> list
         )
         text = next(b.text for b in response.content if b.type == "text")
         data = json.loads(text)
-        return [t.strip() for t in data.get("topics", []) if isinstance(t, str) and t.strip()]
+        topics = [t.strip() for t in data.get("topics", []) if isinstance(t, str) and t.strip()]
+        # Enforce the cap of 8 in code — the schema itself can't (see
+        # _TOPIC_TAGS_SCHEMA above). Truncate only; never pad.
+        return topics[:8]
     except Exception:
         return []
 
