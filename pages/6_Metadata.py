@@ -67,6 +67,7 @@ st.dataframe(
             "Interview status": p["interview_status"],
             "Interview date": p["interview_date"],
             "Descriptor": p["descriptor"],
+            "Interviewer(s)": ", ".join(p["interviewers"]),
         }
         for p in filtered_people
     ],
@@ -122,6 +123,21 @@ with st.form(f"edit_person_form_{person_id}"):
         if current_status in INTERVIEW_STATUS_OPTIONS else INTERVIEW_STATUS_OPTIONS.index("completed"),
     )
     e_descriptor = st.text_input("One-line descriptor", value=selected["descriptor"] or "")
+
+    st.caption("Interviewer(s) — up to 5. One name per box; leave extras blank.")
+    existing_interviewers = selected["interviewers"] + [""] * 5
+    ic1, ic2, ic3, ic4, ic5 = st.columns(5)
+    with ic1:
+        e_interviewer_1 = st.text_input("Interviewer 1", value=existing_interviewers[0])
+    with ic2:
+        e_interviewer_2 = st.text_input("Interviewer 2", value=existing_interviewers[1])
+    with ic3:
+        e_interviewer_3 = st.text_input("Interviewer 3", value=existing_interviewers[2])
+    with ic4:
+        e_interviewer_4 = st.text_input("Interviewer 4", value=existing_interviewers[3])
+    with ic5:
+        e_interviewer_5 = st.text_input("Interviewer 5", value=existing_interviewers[4])
+
     save_edit = st.form_submit_button("Save changes")
 
 if save_edit:
@@ -137,6 +153,10 @@ if save_edit:
         rank=e_rank.strip(),
         branch_service=e_branch.strip(),
         interview_status=e_status,
+        interviewers=[
+            e_interviewer_1, e_interviewer_2, e_interviewer_3,
+            e_interviewer_4, e_interviewer_5,
+        ],
     )
     st.success("Saved.")
     st.rerun()
@@ -182,6 +202,9 @@ else:
         # per-run expander).
         with st.container(border=True):
             st.markdown(f"**{interview['title']}** — {when}")
+            if interview.get("notes"):
+                st.caption("Additional notes:")
+                st.caption(interview["notes"])
             runs = storage.get_runs_for_interview(interview["id"])
             if not runs:
                 st.write("No runs yet for this interview.")

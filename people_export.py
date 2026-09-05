@@ -26,6 +26,7 @@ COLUMNS = [
     ("interview_status", "Interview status"),
     ("interview_date", "Interview date"),
     ("descriptor", "Descriptor"),
+    ("interviewers", "Interviewer(s)"),
 ]
 
 
@@ -40,7 +41,14 @@ def build_people_excel(people: list[dict]) -> bytes:
     ws.title = "People"
     ws.append([header for _, header in COLUMNS])
     for p in people:
-        ws.append([p.get(field) or "" for field, _ in COLUMNS])
+        row = []
+        for field, _ in COLUMNS:
+            value = p.get(field) or ""
+            # "interviewers" is a list (the JSON-backed field) — join it
+            # for display in one Excel cell; every other field is
+            # already a plain string.
+            row.append(", ".join(value) if isinstance(value, list) else value)
+        ws.append(row)
 
     # Rough auto-width so columns aren't all default-width in Excel — a
     # nicety, not load-bearing, so it degrades harmlessly if a value is

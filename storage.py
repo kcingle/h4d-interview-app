@@ -62,6 +62,7 @@ def init_db() -> None:
                 rank TEXT,
                 branch_service TEXT,
                 interview_status TEXT NOT NULL DEFAULT 'completed',
+                interviewers_json TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -106,6 +107,16 @@ def init_db() -> None:
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS dictionary_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT NOT NULL,
+                definition TEXT NOT NULL,
+                is_acronym INTEGER NOT NULL DEFAULT 0,
+                expansion TEXT,
+                is_important INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
             """
         )
         _migrate_runs_table(conn)
@@ -115,8 +126,6 @@ def init_db() -> None:
         _cleanup_dead_schema_v1(conn)
         _seed_mom_test_document_if_missing(conn)
         _replace_mom_test_text_with_pdf_slot(conn)
-        _seed_people_if_empty(conn)
-        _backfill_seed_people_new_fields(conn)
         conn.commit()
     finally:
         conn.close()
@@ -224,7 +233,8 @@ def _migrate_people_table(conn: sqlite3.Connection) -> None:
     that extension existed. `interview_status`'s DEFAULT 'completed'
     backfills every existing row automatically the moment the column is
     added — that's the "default completed for existing records" behavior,
-    with no separate UPDATE needed.
+    with no separate UPDATE needed. `interviewers_json` (a JSON array of
+    up to 5 names) is the newest addition — see add_person/update_person.
     """
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
     migrations = {
@@ -238,6 +248,7 @@ def _migrate_people_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE people ADD COLUMN interview_status TEXT "
             "NOT NULL DEFAULT 'completed'"
         ),
+        "interviewers_json": "ALTER TABLE people ADD COLUMN interviewers_json TEXT",
     }
     for column, ddl in migrations.items():
         if column not in existing:
@@ -361,69 +372,6 @@ def _cleanup_dead_schema_v1(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE run_hypotheses")
 
 
-# --- SEED DATA (Step 6 demo people) -----------------------------------------
-# Only fires when the people table is completely empty; never overwrites
-# existing people. These are standalone example rows, NOT linked to any
-# real interview (their names are tagged "(example)" so they're obvious),
-# thematically matching the Step 4 seed hypothesis tree's scenario.
-def _seed_people_if_empty(conn: sqlite3.Connection) -> None:
-    count = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
-    if count:
-        return
-
-    def insert(name, role, organization, seniority_level, relationship, descriptor,
-               rank, branch_service, interview_status):
-        conn.execute(
-            "INSERT INTO people (name, role, organization, seniority_level, "
-            "relationship, interview_date, descriptor, rank, branch_service, "
-            "interview_status, created_at) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)",
-            (name, role, organization, seniority_level, relationship, descriptor,
-             rank, branch_service, interview_status, _now()),
-        )
-
-    insert(
-        "Dismounted Squad Leader (example)",
-        "Squad Leader",
-        "Notional Infantry Battalion",
-        "NCO",
-        "beneficiary",
-        "Leads dismounted patrols that lose GPS in contested terrain — example seed data.",
-        "SSG / E-6",
-        "Army",
-        "completed",
-    )
-    insert(
-        "Route Planning Officer (example)",
-        "Route Planner",
-        "Notional Brigade S3",
-        "Company-grade officer",
-        "adjacent",
-        "Plans routes accounting for comms-denied navigation risk — example seed data.",
-        "Capt / O-3",
-        "Air Force",
-        "follow-up needed",
-    )
-
-
-# --- ONE-TIME BACKFILL: enrich the two example seed people (Step 6) with
-# the rank/branch_service/interview_status values above, since they were
-# created before those fields existed and _seed_people_if_empty() only
-# ever runs on an empty table. Scoped to the exact two example names, and
-# only while their new fields are still blank, so this can never touch a
-# real person or overwrite an edit made since. Safe to delete once past.
-def _backfill_seed_people_new_fields(conn: sqlite3.Connection) -> None:
-    backfills = {
-        "Dismounted Squad Leader (example)": ("SSG / E-6", "Army", "completed"),
-        "Route Planning Officer (example)": ("Capt / O-3", "Air Force", "follow-up needed"),
-    }
-    for name, (rank, branch_service, interview_status) in backfills.items():
-        conn.execute(
-            "UPDATE people SET rank = ?, branch_service = ?, interview_status = ? "
-            "WHERE name = ? AND (rank IS NULL OR rank = '') "
-            "AND (branch_service IS NULL OR branch_service = '')",
-            (rank, branch_service, interview_status, name),
-        )
-
 
 def _now() -> str:
     """ISO-8601 UTC timestamp used for every created_at column."""
@@ -487,7 +435,7 @@ def get_person_for_interview(interview_id: int) -> dict | None:
             "(SELECT person_id FROM interviews WHERE id = ?)",
             (interview_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return _parse_person_row(row) if row else None
     finally:
         conn.close()
 
@@ -1011,8 +959,20 @@ ALLOWED_INTERVIEW_STATUSES = ("scheduled", "completed", "follow-up needed")
 
 _PEOPLE_COLUMNS = (
     "id, name, role, organization, seniority_level, relationship, "
-    "interview_date, descriptor, rank, branch_service, interview_status, created_at"
+    "interview_date, descriptor, rank, branch_service, interview_status, "
+    "interviewers_json, created_at"
 )
+
+
+def _parse_person_row(row: sqlite3.Row) -> dict:
+    """dict(row), with interviewers_json parsed back into a real list —
+    every SELECT using _PEOPLE_COLUMNS should go through this rather than
+    a bare dict(row), so "interviewers" is always a list, never raw JSON
+    text, and old rows with no interviewers_json (before this field
+    existed) come back as [] instead of None."""
+    d = dict(row)
+    d["interviewers"] = json.loads(d.pop("interviewers_json") or "[]")
+    return d
 
 
 def add_person(
@@ -1026,18 +986,27 @@ def add_person(
     rank: str = "",
     branch_service: str = "",
     interview_status: str = "completed",
+    interviewers: list[str] | None = None,
 ) -> int:
     """Add a new person and return their id. `interview_status` defaults
     to "completed" — matching the normal case of confirming metadata
-    right after finishing that interview's analysis."""
+    right after finishing that interview's analysis. `interviewers`: up
+    to 5 names of who conducted the interview, stored as a JSON array
+    (interviewers_json) — a real list, not a delimited string, so
+    reading it back is unambiguous even if a name itself contains a
+    comma/semicolon. Blank/empty names are dropped; more than 5 is
+    truncated, never silently dropping which ones by re-ordering."""
+    interviewers = [n.strip() for n in (interviewers or []) if n and n.strip()][:5]
     conn = get_connection()
     try:
         cur = conn.execute(
             "INSERT INTO people (name, role, organization, seniority_level, "
             "relationship, interview_date, descriptor, rank, branch_service, "
-            "interview_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "interview_status, interviewers_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, role, organization, seniority_level, relationship, interview_date,
-             descriptor, rank, branch_service, interview_status, _now()),
+             descriptor, rank, branch_service, interview_status,
+             json.dumps(interviewers), _now()),
         )
         conn.commit()
         return cur.lastrowid
@@ -1048,9 +1017,11 @@ def add_person(
 def _attach_interviews(conn: sqlite3.Connection, person: dict) -> dict:
     """Attach the list of interviews linked to this person (via
     interviews.person_id), so the Metadata page can show "their
-    interview(s) and its runs" without a separate query per caller."""
+    interview(s) and its runs" — including each one's Additional Notes,
+    so that per-interview context shows up alongside this person's
+    metadata too — without a separate query per caller."""
     rows = conn.execute(
-        "SELECT id, title, created_at FROM interviews WHERE person_id = ? "
+        "SELECT id, title, notes, created_at FROM interviews WHERE person_id = ? "
         "ORDER BY created_at ASC",
         (person["id"],),
     ).fetchall()
@@ -1066,7 +1037,7 @@ def get_people() -> list[dict]:
         rows = conn.execute(
             f"SELECT {_PEOPLE_COLUMNS} FROM people ORDER BY created_at DESC"
         ).fetchall()
-        return [_attach_interviews(conn, dict(row)) for row in rows]
+        return [_attach_interviews(conn, _parse_person_row(row)) for row in rows]
     finally:
         conn.close()
 
@@ -1079,7 +1050,7 @@ def get_person(person_id: int) -> dict | None:
         row = conn.execute(
             f"SELECT {_PEOPLE_COLUMNS} FROM people WHERE id = ?", (person_id,)
         ).fetchone()
-        return _attach_interviews(conn, dict(row)) if row else None
+        return _attach_interviews(conn, _parse_person_row(row)) if row else None
     finally:
         conn.close()
 
@@ -1096,18 +1067,22 @@ def update_person(
     rank: str = "",
     branch_service: str = "",
     interview_status: str = "completed",
+    interviewers: list[str] | None = None,
 ) -> None:
     """Update a person's fields in place. Edits made on the Metadata page
-    persist via this function."""
+    persist via this function. See add_person for `interviewers`'
+    format/limits."""
+    interviewers = [n.strip() for n in (interviewers or []) if n and n.strip()][:5]
     conn = get_connection()
     try:
         conn.execute(
             "UPDATE people SET name = ?, role = ?, organization = ?, "
             "seniority_level = ?, relationship = ?, interview_date = ?, "
-            "descriptor = ?, rank = ?, branch_service = ?, interview_status = ? "
-            "WHERE id = ?",
+            "descriptor = ?, rank = ?, branch_service = ?, interview_status = ?, "
+            "interviewers_json = ? WHERE id = ?",
             (name, role, organization, seniority_level, relationship, interview_date,
-             descriptor, rank, branch_service, interview_status, person_id),
+             descriptor, rank, branch_service, interview_status,
+             json.dumps(interviewers), person_id),
         )
         conn.commit()
     finally:
@@ -1285,6 +1260,73 @@ def delete_document(document_id: int) -> None:
         if row["is_pinned"]:
             raise DocumentError("Pinned documents cannot be deleted.")
         conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Dictionary — terms/acronyms/concepts explained via Chat's "Background &
+# Definitions" mode (see ai.define_terms), saved here only when a person
+# explicitly clicks "Add to dictionary" — never automatically.
+# ---------------------------------------------------------------------------
+
+def add_dictionary_entry(
+    term: str, definition: str, is_acronym: bool = False, expansion: str = ""
+) -> int:
+    """Add one dictionary entry and return its id. `expansion` is the
+    spelled-out form of an acronym (e.g. "Offensive Counter Air" for
+    "OCA") — meaningless when `is_acronym` is False, so callers should
+    leave it blank then."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "INSERT INTO dictionary_entries "
+            "(term, definition, is_acronym, expansion, is_important, created_at) "
+            "VALUES (?, ?, ?, ?, 0, ?)",
+            (term.strip(), definition.strip(), int(bool(is_acronym)), expansion.strip(), _now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_dictionary_entries() -> list[dict]:
+    """Return every dictionary entry, most important first, then newest
+    first — so marking a term important actually surfaces it, rather
+    than just tagging it in place. Filtering/search happens page-side
+    (same convention as the Metadata page's filters) — this always
+    returns the full list."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, term, definition, is_acronym, expansion, is_important, created_at "
+            "FROM dictionary_entries ORDER BY is_important DESC, created_at DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def set_dictionary_importance(entry_id: int, important: bool) -> None:
+    """Mark (or unmark) one entry as high-importance."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE dictionary_entries SET is_important = ? WHERE id = ?",
+            (int(bool(important)), entry_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_dictionary_entry(entry_id: int) -> None:
+    """Permanently delete one dictionary entry."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM dictionary_entries WHERE id = ?", (entry_id,))
         conn.commit()
     finally:
         conn.close()

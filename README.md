@@ -19,23 +19,28 @@ and past runs — works with no key.
 
 ## Pages
 
-- **Process Interview** (`app.py`, the home page) — check off one or more
+- **Process Interview** (`Process_Interview.py`, the home page — renamed
+  from `app.py` so the sidebar reads "Process Interview" instead of the
+  filename-derived "app") — check off one or more
   hypotheses from the tree to test this run (active ones pre-checked),
-  pick reference documents to include, paste interview notes plus
+  pick reference documents to include, and paste interview notes plus
   optional Additional Notes (nonverbal communication, tone, the setting,
-  or anything else observed but not written as dialogue), run the
-  two-step AI flow (clarifying questions, then the full analysis), review
-  results as tables, and confirm interviewee metadata. Saves automatically,
-  and confirming metadata takes you straight to the Interviews page for
-  that one interview (pre-selected, its run already expanded) instead of
-  showing the results a second time on this page.
+  or anything else observed but not written as dialogue). Running the
+  two-step AI flow (clarifying questions, then the full analysis) saves
+  the interview and hands off IMMEDIATELY to the Interviews page for that
+  one interview (pre-selected, its run auto-expanded) — the redirect
+  never waits on anything else, including interviewee metadata.
 - **Interviews** — browse every saved interview, review all of its past
   runs (each kept forever, each exportable to Markdown/.txt with a
   provenance header), inspect or regenerate that run's structured digest
   (see below), rerun the interview against one or more different
   hypotheses without losing earlier runs, or delete the whole interview
   (and every run it has) — behind a confirm/cancel step, the linked
-  person is kept.
+  person is kept. A freshly-processed interview with no linked person
+  yet also gets a suggest-and-confirm interviewee metadata form here
+  (moved from Process Interview so the handoff there is never gated on
+  filling it out) — including up to 5 interviewer names, stored as a
+  real list (`people.interviewers_json`), not a delimited string.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, delete a node (only once it has no
   children — delete those first), or toggle active/dormant. Nothing is
@@ -84,17 +89,29 @@ and past runs — works with no key.
   of 2+ interviews on one hypothesis or topic tag. Like Hypothesis
   Findings, this only retrieves and organizes what was already said —
   never an AI-written "here's the contrast" summary.
-- **Chat** — a real conversation over the whole corpus, unlike Hypothesis
-  Findings/Search & Compare's zero-synthesis retrieval. Every message sends
-  the full hypothesis tree, people roster, document list, and every
-  interview's raw transcript + Additional Notes + complete analysis (not
-  just its digest) as context (`ai.build_corpus_context`) — cached after
-  the first turn each session, so later turns are cheap; only the first
-  message and an explicit "Refresh context" pay full price. Answers cite
-  which interview a finding came from, and the system prompt tells the
-  model to say so plainly rather than guess when something isn't in the
-  material — verified live: it correctly declined to answer about an
-  interview that doesn't exist in the corpus.
+- **Chat** — two tabs. **Corpus Chat** is a real conversation over the
+  whole corpus, unlike Hypothesis Findings/Search & Compare's
+  zero-synthesis retrieval: every message sends the full hypothesis
+  tree, people roster, document list, and every interview's raw
+  transcript + Additional Notes + complete analysis (not just its
+  digest) as context (`ai.build_corpus_context`) — cached after the
+  first turn each session, so later turns are cheap; only the first
+  message and an explicit "Refresh context" pay full price. Answers
+  cite which interview a finding came from, and the system prompt tells
+  the model to say so plainly rather than guess when something isn't in
+  the material — verified live: it correctly declined to answer about
+  an interview that doesn't exist in the corpus. **Background &
+  Definitions** (`ai.define_terms`) is a different kind of assistant:
+  it explains words/acronyms/concepts, and — unlike everywhere else in
+  this app — is explicitly allowed to use general domain knowledge, not
+  just the corpus (verified live: correctly gave the standard DoD
+  meaning of an ambiguous acronym when the corpus was empty, rather
+  than guessing). Each definition has an "Add to dictionary" button;
+  nothing saves automatically.
+- **Dictionary** — every term saved from Chat's Background &
+  Definitions tab: search by term or definition text, mark an entry
+  high-importance (sorts it to the top), or delete it. Pure browsing —
+  no AI calls happen here.
 - **Settings** — enter your Anthropic API key. Saved locally to a `.env`
   file next to the app (gitignored — never committed, see `env_store.py`),
   so every page that calls the API sees the same key, and it survives
@@ -102,16 +119,22 @@ and past runs — works with no key.
 
 ## Architecture
 
-- `app.py` — entry point, and the "Process Interview" home page.
+- `Process_Interview.py` — entry point, and the "Process Interview" home
+  page. Renamed from `app.py`: Streamlit's classic multipage nav derives
+  a page's sidebar label from its filename with no override for the
+  entry script, so it showed up as the bare word "app" — confusing
+  enough on its own to be worth a rename.
 - `pages/` — one file per page; Streamlit's built-in multipage nav lists
   these in the sidebar automatically (numeric prefixes control order and
   are stripped from the displayed name).
 - `ai.py` — **all** AI/LLM logic. Pages never call an AI API directly.
   Holds the exact graded system prompt (verbatim, never edited), plus
-  separate, unrelated prompts for Chat (`CHAT_SYSTEM_INSTRUCTIONS`) and
-  hypothesis suggestions (`suggest_hypotheses`), and
+  separate, unrelated prompts for Chat (`CHAT_SYSTEM_INSTRUCTIONS`),
+  hypothesis suggestions (`suggest_hypotheses`), and term/acronym/concept
+  definitions (`define_terms` — the one place in this app explicitly
+  allowed to use general knowledge, not just the corpus), plus
   `build_corpus_context`, which formats everything the rest of the app
-  knows into one text blob both of those send as context.
+  knows into one text blob the corpus-grounded ones send as context.
 - `storage.py` — **all** persistence, backed by SQLite, behind simple
   named functions (`save_interview`, `get_interviews`, ...). If the
   backend is ever swapped to a hosted database, only this file changes.
@@ -196,7 +219,7 @@ pip install -r requirements.txt
 With the virtual environment activated:
 
 ```powershell
-streamlit run app.py
+streamlit run Process_Interview.py
 ```
 
 This opens the app in your browser (usually `http://localhost:8501`).

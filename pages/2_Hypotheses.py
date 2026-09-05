@@ -110,11 +110,17 @@ def render_node(node: dict, depth: int) -> None:
             if child_text.strip():
                 storage.add_hypothesis(node["id"], child_text.strip())
                 st.session_state[f"show_add_child_{node['id']}"] = False
+                # Clear the text box's own stored value too — a widget's
+                # session_state entry otherwise persists even while the
+                # form is hidden, so reopening "Add child" later would
+                # show this leftover text instead of a clean box.
+                st.session_state.pop(f"child_text_{node['id']}", None)
                 st.rerun()
             else:
                 st.warning("Enter some text for the new child hypothesis.")
         if cancelled_add:
             st.session_state[f"show_add_child_{node['id']}"] = False
+            st.session_state.pop(f"child_text_{node['id']}", None)
             st.rerun()
 
     if st.session_state.get(f"show_edit_{node['id']}"):
@@ -129,11 +135,18 @@ def render_node(node: dict, depth: int) -> None:
             if new_text.strip():
                 storage.edit_hypothesis_text(node["id"], new_text.strip())
                 st.session_state[f"show_edit_{node['id']}"] = False
+                # Clear the text box's own stored value — next time Edit
+                # is reopened (for this node or, since the key is
+                # per-node, any node), it should fall back to that
+                # node's own current text via `value=node["text"]`
+                # rather than whatever was last typed here.
+                st.session_state.pop(f"edit_text_{node['id']}", None)
                 st.rerun()
             else:
                 st.warning("Hypothesis text can't be empty.")
         if cancelled_edit:
             st.session_state[f"show_edit_{node['id']}"] = False
+            st.session_state.pop(f"edit_text_{node['id']}", None)
             st.rerun()
 
     if st.session_state.get(f"show_delete_confirm_{node['id']}"):
@@ -279,6 +292,11 @@ else:
         if submitted_family:
             if new_family_text.strip():
                 storage.add_hypothesis(None, new_family_text.strip())
+                # Clear the box's own stored value — otherwise the next
+                # time you open this expander to add another hypothesis,
+                # the text you just submitted is still sitting there and
+                # has to be deleted by hand before typing a new one.
+                st.session_state.pop("new_family_text", None)
                 st.rerun()
             else:
                 st.warning("Enter some text for the new family hypothesis.")

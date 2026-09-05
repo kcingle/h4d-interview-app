@@ -1,14 +1,14 @@
 """
 render.py — Shared Streamlit rendering for one processed interview's
-output. Used by both app.py (a freshly-computed result) and
-pages/1_Interviews.py (a past run's saved output), so both places render
-tables identically. Not AI logic (ai.py owns the API calls, including
-building the per-run digest — see ai.build_digest) and not persistence
+output. Used by both pages/1_Interviews.py and pages/6_Metadata.py (each
+showing a past run's saved output), so both places render tables
+identically. Not AI logic (ai.py owns the API calls, including building
+the per-run digest — see ai.build_digest) and not persistence
 (storage.py owns the database) — purely presentation.
 
-pages/1_Interviews.py can't simply `import app` for this, since app.py's
-top-level code is the actual Streamlit page — importing it would re-run
-that page's UI as a side effect.
+(Process_Interview.py, the entry point, hands off to the Interviews page
+immediately after saving a run rather than rendering results itself —
+see that file's docstring — so it no longer uses this module for that.)
 """
 
 import streamlit as st

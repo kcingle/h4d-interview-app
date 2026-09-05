@@ -145,7 +145,7 @@ def _build_user_message_content(user_text: str, documents: list[dict] | None):
 # JSON schemas — plumbing only. These control how the response is
 # structured for rendering; they do not change what the model is asked to
 # do (that's entirely the system prompt above). Rendered table headers in
-# app.py use the exact strings from the prompt, not these field names.
+# render.py use the exact strings from the prompt, not these field names.
 # ---------------------------------------------------------------------------
 
 CLARIFYING_QUESTIONS_SCHEMA = {
@@ -973,3 +973,80 @@ def suggest_hypotheses(corpus_context: str, api_key: str) -> list[dict]:
     )
     data = _extract_json(response)
     return list(data.get("suggestions", []))[:8]
+
+
+# ---------------------------------------------------------------------------
+# Background & Definitions — a specialized mode of Chat: explain words,
+# acronyms, or concepts, rather than answer from the corpus. Unlike Chat's
+# main mode (and every AI feature above it), this is explicitly ALLOWED to
+# draw on general domain knowledge, not just what's in the interviews —
+# a definition of "OCA" is a fact, not something that needs a specific
+# interview to back it up. When a term DOES appear in the corpus, the
+# system prompt asks the model to say how it was used there too.
+# ---------------------------------------------------------------------------
+
+_DEFINE_TERMS_SYSTEM_PROMPT = (
+    "You are a specialized assistant that ONLY explains what words, "
+    "acronyms, or concepts mean, for a Hacking for Defense (H4D) "
+    "student team's DoD customer-discovery work. Below is the team's "
+    "corpus (hypotheses, people, documents, interviews) for context.\n\n"
+    "Given the team's question, identify every distinct term, acronym, "
+    "or concept they're asking about and define each one clearly and "
+    "concisely. Unlike other assistants in this app, you MAY use "
+    "general domain/military/DoD knowledge for standard definitions — "
+    "you are not limited to only what's in the corpus above. If a term "
+    "also appears in the corpus, briefly note how it was used there. "
+    "If a term is a real acronym, give its spelled-out expansion; if "
+    "it is not an acronym, leave the expansion blank. If you don't "
+    "actually know what a term means or aren't confident of an "
+    "acronym's expansion, say so plainly in the definition rather than "
+    "guessing — never invent an expansion for a real acronym."
+)
+
+_DEFINE_TERMS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "terms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "term": {"type": "string"},
+                    "definition": {"type": "string"},
+                    "is_acronym": {"type": "boolean"},
+                    "expansion": {"type": "string"},
+                },
+                "required": ["term", "definition", "is_acronym", "expansion"],
+                "additionalProperties": False,
+            },
+            # No "maxItems" — unsupported by Claude's structured-output
+            # schema (see CLARIFYING_QUESTIONS_SCHEMA's comment above);
+            # a question naming several terms just returns several rows.
+        }
+    },
+    "required": ["terms"],
+    "additionalProperties": False,
+}
+
+
+def define_terms(query: str, corpus_context: str, api_key: str) -> list[dict]:
+    """Ask the AI to define the term(s)/acronym(s)/concept(s) in `query`.
+    Returns [{"term", "definition", "is_acronym", "expansion"}, ...] — one
+    entry per distinct term identified, never inserted into the
+    dictionary automatically (see storage.add_dictionary_entry, called
+    only when a person clicks "Add to dictionary" on the Chat page).
+
+    Raises AIError on failure — like suggest_hypotheses, this is a
+    primary action the user explicitly triggered, so a failure should be
+    visible rather than silently swallowed.
+    """
+    client = _client(api_key)
+    system = f"{_DEFINE_TERMS_SYSTEM_PROMPT}\n\n{corpus_context}"
+    response = _call(
+        client,
+        messages=[{"role": "user", "content": query}],
+        system=system,
+        schema=_DEFINE_TERMS_SCHEMA,
+    )
+    data = _extract_json(response)
+    return list(data.get("terms", []))
