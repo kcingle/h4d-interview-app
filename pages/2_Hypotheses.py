@@ -11,6 +11,12 @@ diagram — see build_visual_tree_html). The visual tree is plain HTML
 (nested <details>/<summary>, native browser disclosure — no JS, no new
 dependency, works fully offline) rendered via
 streamlit.components.v1.html; editing still only happens in List view.
+
+Hypotheses are never auto-added — the "Suggest hypotheses" section below
+is the one place the AI proposes candidates (grounded in everything
+logged in the corpus so far, see ai.suggest_hypotheses), and even then
+nothing reaches storage.add_hypothesis until a person checks the ones
+they want and clicks "Add approved".
 """
 
 import html as html_lib
@@ -18,6 +24,8 @@ import html as html_lib
 import streamlit as st
 import streamlit.components.v1 as components
 
+import ai
+import env_store
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Hypotheses", page_icon="🧩")
@@ -118,6 +126,32 @@ def _count_nodes(nodes: list[dict]) -> int:
     return sum(1 + _count_nodes(n["children"]) for n in nodes)
 
 
+def _label_to_id(nodes: list[dict]) -> dict[str, int]:
+    """Flatten the tree into {label: id}, for resolving a suggestion's
+    suggested_parent_label back to a real parent_id."""
+    mapping = {}
+    for node in nodes:
+        mapping[node["label"]] = node["id"]
+        mapping.update(_label_to_id(node["children"]))
+    return mapping
+
+
+def _build_corpus_context_for_suggestions() -> str:
+    """Same assembly Chat uses (ai.build_corpus_context) — the full
+    hypothesis tree, people roster, document list, and every interview's
+    raw transcript + Additional Notes + complete analysis — so a
+    suggestion is grounded in the same material a person would see."""
+    hypotheses_tree = storage.get_hypothesis_tree()
+    people = storage.get_people()
+    documents = storage.get_documents()
+    interviews = []
+    for interview in storage.get_interviews():
+        person = storage.get_person_for_interview(interview["id"])
+        runs = storage.get_runs_for_interview(interview["id"])
+        interviews.append({**interview, "person": person, "runs": runs})
+    return ai.build_corpus_context(hypotheses_tree, interviews, people, documents)
+
+
 def _visual_tree_node_html(node: dict) -> str:
     """One node's HTML: a <details>/<summary> if it has children (so it's
     a real click-to-expand/collapse toggle), or a plain row if it's a
@@ -200,6 +234,76 @@ else:
                 st.rerun()
             else:
                 st.warning("Enter some text for the new family hypothesis.")
+
+    st.divider()
+    with st.expander("🤖 Suggest hypotheses based on what we've learned so far"):
+        st.caption(
+            "Grounded in every interview logged so far (transcripts, notes, "
+            "and full analysis) — nothing is added to the tree until you "
+            "check the ones you want and click \"Add approved\" below."
+        )
+        suggest_api_key = env_store.load_api_key()
+        if not suggest_api_key:
+            st.warning("No Anthropic API key set yet. Enter one on the **Settings** page first.")
+
+        if st.button("Suggest hypotheses", disabled=not suggest_api_key):
+            with st.spinner("Reviewing the corpus..."):
+                try:
+                    corpus_context = _build_corpus_context_for_suggestions()
+                    st.session_state.hypothesis_suggestions = ai.suggest_hypotheses(
+                        corpus_context, suggest_api_key
+                    )
+                except ai.AIError as e:
+                    st.error(str(e))
+
+        suggestions = st.session_state.get("hypothesis_suggestions")
+        if suggestions is not None:
+            if not suggestions:
+                st.info(
+                    "No suggestions came back — usually means there isn't enough "
+                    "logged yet for the AI to responsibly ground one, or nothing "
+                    "stood out this time."
+                )
+            else:
+                label_to_id = _label_to_id(tree)
+                for i, s in enumerate(suggestions):
+                    parent_label = (s.get("suggested_parent_label") or "").strip()
+                    if parent_label and parent_label in label_to_id:
+                        parent_note = f"child of **{parent_label}**"
+                    else:
+                        parent_note = "new root hypothesis"
+                    st.checkbox(
+                        f"{s.get('text', '')}  _({parent_note})_",
+                        key=f"suggest_check_{i}",
+                    )
+                    st.caption(s.get("rationale", ""))
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    add_approved_clicked = st.button("✅ Add approved")
+                with c2:
+                    discard_clicked = st.button("🗑️ Discard suggestions")
+
+                if add_approved_clicked:
+                    added = 0
+                    for i, s in enumerate(suggestions):
+                        if not st.session_state.get(f"suggest_check_{i}"):
+                            continue
+                        text = (s.get("text") or "").strip()
+                        if not text:
+                            continue
+                        parent_label = (s.get("suggested_parent_label") or "").strip()
+                        parent_id = label_to_id.get(parent_label)  # None -> root
+                        storage.add_hypothesis(parent_id, text)
+                        added += 1
+                    st.session_state.hypothesis_suggestions = None
+                    if added:
+                        st.success(f"Added {added} hypothesis(es).")
+                    st.rerun()
+
+                if discard_clicked:
+                    st.session_state.hypothesis_suggestions = None
+                    st.rerun()
 
     st.divider()
     st.subheader("Tree")

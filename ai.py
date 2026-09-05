@@ -885,3 +885,91 @@ def run_chat(
     response = _call(client, messages=messages, system=system, max_tokens=4096)
     reply = _extract_text(response)
     return {"reply": reply, "history": messages + [{"role": "assistant", "content": reply}]}
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis suggestions — per feedback, hypotheses are never auto-added.
+# This proposes candidates for the team to review; nothing reaches
+# storage.add_hypothesis unless a person explicitly approves it on the
+# Hypotheses page. Based on the same full-corpus context Chat uses (every
+# interview's transcript + full analysis + the existing tree), so a
+# suggestion is grounded in what the team has actually found, not guessed.
+# ---------------------------------------------------------------------------
+
+_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT = (
+    "You help a Hacking for Defense (H4D) student team refine their DoD "
+    "customer-discovery hypothesis tree, based on everything they've "
+    "learned so far. Below is their full existing hypothesis tree and "
+    "every interview logged so far (transcripts, additional notes, and "
+    "the complete analysis for every run). Propose new candidate "
+    "hypotheses worth testing next — a new root-level hypothesis, a "
+    "refinement, or a natural child of an existing one (e.g. probing "
+    "WHY a validated hypothesis held, or an alternative explanation for "
+    "an invalidated one) — each one surfacing a real gap, pattern, or "
+    "open question in what the interviews actually show.\n\n"
+    "Ground every suggestion in something specific the interviews "
+    "actually said; name which interview(s) support it in the "
+    "rationale. Never invent a finding that isn't in the material "
+    "below — if there isn't enough material yet to responsibly suggest "
+    "anything (e.g. no interviews logged yet), return an empty list "
+    "rather than guessing. Suggest at most 8. For each one, if it "
+    "naturally belongs as a child of an existing hypothesis, give that "
+    "hypothesis's exact label (e.g. \"1\" or \"2a\") in "
+    "suggested_parent_label; leave it blank for a new root-level "
+    "hypothesis."
+)
+
+_HYPOTHESIS_SUGGESTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "suggested_parent_label": {"type": "string"},
+                },
+                "required": ["text", "rationale", "suggested_parent_label"],
+                "additionalProperties": False,
+            },
+            # No "maxItems" — unsupported by Claude's structured-output
+            # schema (see CLARIFYING_QUESTIONS_SCHEMA's comment above for
+            # the exact 400 this triggers); capped to 8 in code below
+            # instead.
+        }
+    },
+    "required": ["suggestions"],
+    "additionalProperties": False,
+}
+
+
+def suggest_hypotheses(corpus_context: str, api_key: str) -> list[dict]:
+    """Ask the AI to propose new candidate hypotheses, grounded in
+    everything logged in the corpus so far (see build_corpus_context).
+    NEVER inserts anything into the tree — returns suggestions only, as
+    [{"text", "rationale", "suggested_parent_label"}, ...] (at most 8,
+    truncated in code, not via the schema); the Hypotheses page shows
+    them for review and adds only the ones a person explicitly checks
+    and approves, via the normal storage.add_hypothesis.
+
+    Unlike suggest_metadata/_suggest_topics (silent, best-effort
+    conveniences that fall back to empty on any failure), this raises
+    AIError on failure — it's a primary action the user explicitly
+    triggered by clicking a button, so a failure should be visible, not
+    swallowed into a quietly-empty suggestion list.
+    """
+    client = _client(api_key)
+    system = f"{_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT}\n\n{corpus_context}"
+    response = _call(
+        client,
+        messages=[{
+            "role": "user",
+            "content": "Suggest new hypotheses to test next, based on everything above.",
+        }],
+        system=system,
+        schema=_HYPOTHESIS_SUGGESTIONS_SCHEMA,
+    )
+    data = _extract_json(response)
+    return list(data.get("suggestions", []))[:8]

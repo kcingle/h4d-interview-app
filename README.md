@@ -35,11 +35,16 @@ and past runs — works with no key.
 - **Hypotheses** — build and manage the hypothesis tree: add
   families/children, edit text, toggle active/dormant. Nothing is ever
   deleted. Nothing is ever auto-added either — a brand-new database
-  starts with an empty tree; every hypothesis is one you (or an
-  AI-suggest-and-approve flow, once built) added on purpose. Two view
-  modes: **List (edit)** for all of the above, and **Visual tree** — a
-  real clickable expand/collapse diagram (plain HTML, no new dependency)
-  for browsing the tree read-only.
+  starts with an empty tree; every hypothesis is one you added, or one
+  an AI suggestion you explicitly approved. **Suggest hypotheses**
+  (`ai.suggest_hypotheses`) proposes new candidates grounded in
+  everything logged in the corpus so far (same material Chat uses) —
+  each with a rationale citing which interview supports it, and an
+  optional parent to attach under. Suggestions are shown as checkboxes;
+  nothing reaches the tree until you check the ones you want and click
+  "Add approved." Two view modes: **List (edit)** for all of the above,
+  and **Visual tree** — a real clickable expand/collapse diagram (plain
+  HTML, no new dependency) for browsing the tree read-only.
 - **Documents** — upload (.txt, .md, or .pdf) or paste reference
   documents the analysis engine can use as context. Includes a
   permanent, protected pinned slot for the Mom Test book PDF (upload it
@@ -92,10 +97,11 @@ and past runs — works with no key.
   these in the sidebar automatically (numeric prefixes control order and
   are stripped from the displayed name).
 - `ai.py` — **all** AI/LLM logic. Pages never call an AI API directly.
-  Holds the exact graded system prompt (verbatim, never edited), plus a
-  separate, unrelated system prompt for Chat (`CHAT_SYSTEM_INSTRUCTIONS`)
-  and `build_corpus_context`, which formats everything the rest of the
-  app knows into one text blob for Chat to send as context.
+  Holds the exact graded system prompt (verbatim, never edited), plus
+  separate, unrelated prompts for Chat (`CHAT_SYSTEM_INSTRUCTIONS`) and
+  hypothesis suggestions (`suggest_hypotheses`), and
+  `build_corpus_context`, which formats everything the rest of the app
+  knows into one text blob both of those send as context.
 - `storage.py` — **all** persistence, backed by SQLite, behind simple
   named functions (`save_interview`, `get_interviews`, ...). If the
   backend is ever swapped to a hosted database, only this file changes.
