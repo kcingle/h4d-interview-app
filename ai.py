@@ -280,12 +280,25 @@ def _call(
     messages: list[dict],
     system,
     schema: dict | None = None,
-    max_tokens: int = 8000,
+    max_tokens: int = 16000,
 ):
     """Shared call wrapper: same model plumbing, one error-handling chain
     for every call site. `schema` (optional) adds output_config for a
     structured-output call (the two-step analysis); omit it for a
-    free-form text call (chat)."""
+    free-form text call (chat).
+
+    `max_tokens` defaults to 16000, not a smaller number: the current
+    model runs adaptive (extended) thinking by default with no opt-out
+    needed, and thinking tokens count against this SAME cap. On a short
+    call the model finishes with plenty of room to spare, but on a
+    longer/more complex one (a long transcript, several hypotheses to
+    judge), thinking alone can consume the entire budget before any
+    visible output is written — the response then ends with a
+    `thinking` block and zero `text` blocks, which used to surface as
+    an opaque "didn't contain the expected structured output" error
+    that had nothing to do with the schema. See _extract_json/
+    _extract_text for how that failure is now actually diagnosable.
+    """
     kwargs = dict(model=config.MODEL_NAME, max_tokens=max_tokens, system=system, messages=messages)
     if schema is not None:
         kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
@@ -305,22 +318,47 @@ def _call(
         raise AIError(f"Unexpected error while calling the AI: {e}")
 
 
+def _no_text_error(response) -> "AIError":
+    """Build a diagnosable error for a response with zero text blocks —
+    e.g. the model ran out of max_tokens mid-thinking, before writing
+    any visible output. Reports stop_reason and what blocks WERE
+    present (never just "didn't contain the expected output") so this
+    is debuggable from the error message alone, no raw-logging needed."""
+    block_summary = ", ".join(b.type for b in response.content) or "(no content blocks at all)"
+    stop_reason = getattr(response, "stop_reason", "unknown")
+    hint = (
+        " This usually means the model ran out of its output-token budget "
+        "while still thinking, before writing any answer — try again, and "
+        "if it keeps happening on this same interview, it may need a "
+        "larger max_tokens."
+        if stop_reason == "max_tokens"
+        else ""
+    )
+    return AIError(
+        f"The AI response had no text output to read (stop_reason={stop_reason!r}, "
+        f"content blocks: {block_summary}).{hint}"
+    )
+
+
 def _extract_json(response) -> dict:
-    try:
-        text = next(block.text for block in response.content if block.type == "text")
-    except StopIteration:
-        raise AIError("The AI response didn't contain the expected structured output.")
+    text_blocks = [b.text for b in response.content if b.type == "text"]
+    if not text_blocks:
+        raise _no_text_error(response)
+    text = text_blocks[0]
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        raise AIError("The AI response could not be parsed as JSON.")
+    except json.JSONDecodeError as e:
+        preview = text if len(text) <= 2000 else f"{text[:1000]}\n...(truncated)...\n{text[-1000:]}"
+        raise AIError(
+            f"The AI's response could not be parsed as JSON ({e}). Raw response:\n{preview}"
+        )
 
 
 def _extract_text(response) -> str:
-    try:
-        return next(block.text for block in response.content if block.type == "text")
-    except StopIteration:
-        raise AIError("The AI response didn't contain any text.")
+    text_blocks = [b.text for b in response.content if b.type == "text"]
+    if not text_blocks:
+        raise _no_text_error(response)
+    return text_blocks[0]
 
 
 # ---------------------------------------------------------------------------
