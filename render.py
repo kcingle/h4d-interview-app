@@ -280,7 +280,7 @@ def render_analysis(
     markdown_report = build_markdown_report(result, hypothesis, header=export_header)
     # No st.expander here (unlike a plain page): render_analysis is often
     # called from inside an outer expander (one per past run, on the
-    # Interviews and People pages), and Streamlit does not allow nested
+    # Interviews and Metadata pages), and Streamlit does not allow nested
     # expanders — this bit both of those pages from Step 3 onward,
     # whenever a run was actually expanded, until this fix.
     st.caption("📋 Copy report — hover the block below and click the copy icon in its corner.")

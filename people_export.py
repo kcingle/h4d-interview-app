@@ -1,7 +1,10 @@
-"""people_export.py — Builds the .xlsx export of the People roster.
+"""people_export.py — Builds the .xlsx export of the Metadata page's
+roster (the page was renamed from "People" to "Metadata" for clarity —
+this module's name is unchanged since it's about interviewee-metadata
+records, i.e. "people", not the page label).
 
 A small, standalone module (like env_store.py) rather than logic embedded
-in pages/6_People.py: it's a pure function with no Streamlit dependency,
+in pages/6_Metadata.py: it's a pure function with no Streamlit dependency,
 so it's directly unit-testable, and keeps that page's file focused on the
 page itself.
 """
@@ -10,8 +13,8 @@ import io
 
 from openpyxl import Workbook
 
-# Same column set/order as the on-screen table on the People page, so the
-# export always matches what's shown there. (field key, column header).
+# Same column set/order as the on-screen table on the Metadata page, so
+# the export always matches what's shown there. (field key, column header).
 COLUMNS = [
     ("name", "Name"),
     ("role", "Role"),

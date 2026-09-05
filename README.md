@@ -5,10 +5,12 @@ interviews. Built iteratively in small, verified steps.
 
 **Current status:** the core two-step AI analysis engine, interview
 storage with rerun history, a hypothesis tree, reference documents (with
-a pinned Mom Test doc), interviewee metadata + a People view (with a
+a pinned Mom Test doc), interviewee metadata + a Metadata view (with a
 one-click Excel export), exporting a run to Markdown/.txt,
-cross-interview corpus features (Hypothesis Status, Search & Compare),
-and a corpus-wide Chat are all built and working.
+cross-interview corpus features (Hypothesis Findings, Search & Compare),
+and a corpus-wide Chat are all built and working. Every page that lets
+you add a hypothesis, interview, or person also lets you delete one —
+always behind a confirm/cancel step.
 
 **Live AI processing (Process Interview page, and the Interviews page's
 rerun control) requires an Anthropic API key**, entered on the Settings
@@ -30,13 +32,16 @@ and past runs — works with no key.
 - **Interviews** — browse every saved interview, review all of its past
   runs (each kept forever, each exportable to Markdown/.txt with a
   provenance header), inspect or regenerate that run's structured digest
-  (see below), and rerun the interview against one or more different
-  hypotheses without losing earlier runs.
+  (see below), rerun the interview against one or more different
+  hypotheses without losing earlier runs, or delete the whole interview
+  (and every run it has) — behind a confirm/cancel step, the linked
+  person is kept.
 - **Hypotheses** — build and manage the hypothesis tree: add
-  families/children, edit text, toggle active/dormant. Nothing is ever
-  deleted. Nothing is ever auto-added either — a brand-new database
-  starts with an empty tree; every hypothesis is one you added, or one
-  an AI suggestion you explicitly approved. **Suggest hypotheses**
+  families/children, edit text, delete a node (only once it has no
+  children — delete those first), or toggle active/dormant. Nothing is
+  ever auto-added — a brand-new database starts with an empty tree;
+  every hypothesis is one you added, or one an AI suggestion you
+  explicitly approved. **Suggest hypotheses**
   (`ai.suggest_hypotheses`) proposes new candidates grounded in
   everything logged in the corpus so far (same material Chat uses) —
   each with a rationale citing which interview supports it, and an
@@ -54,16 +59,21 @@ and past runs — works with no key.
   is opt-in, toggled per-interview on the Process Interview page. PDFs
   are sent to Claude natively (it reads the actual pages) — no
   text-extraction step, no extra dependency.
-- **People** — browsable/filterable/sortable table of everyone
-  interviewed (name, role, organization, rank, branch/service, seniority,
-  relationship, interview status, date, descriptor), with a one-click
-  **Export to Excel** button (respects the filters set on this page,
-  `people_export.py`), an editable form per person, and their linked
-  interview(s)/runs (also exportable).
-- **Hypothesis Status** — select a hypothesis and see every interview
-  that tested it, rolled up from digests (never full transcripts):
-  mechanical validated/invalidated/untested counts, each interview's
-  verdict with its verbatim quote and interviewee, a clearly separated
+- **Metadata** (renamed from "People" for clarity — this is specifically
+  the interviewee metadata confirmed on Process Interview) —
+  browsable/filterable/sortable table of everyone interviewed (name,
+  role, organization, rank, branch/service, seniority, relationship,
+  interview status, date, descriptor), with a one-click **Export to
+  Excel** button (respects the filters set on this page,
+  `people_export.py`), an editable form per person, a delete button
+  (behind confirm/cancel — any linked interview is kept, just unlinked),
+  and their linked interview(s)/runs (also exportable).
+- **Hypothesis Findings** (renamed from "Hypothesis Status" — it sat too
+  close to "Hypotheses" in the sidebar with an easily-confused name) —
+  select a hypothesis and see every interview that tested it, rolled up
+  from digests (never full transcripts): mechanical
+  validated/invalidated/untested counts, each interview's verdict with
+  its verbatim quote and interviewee, a clearly separated
   "unsupported/inferred" section for any verdict with no verified quote,
   and the hypothesis's full version lineage with its own per-version
   counts. This page only organizes what interviews already said — it
@@ -72,10 +82,10 @@ and past runs — works with no key.
   digest (plain substring matching — no semantic search, no vector DB),
   returning real, attributed, verbatim quotes; and a side-by-side compare
   of 2+ interviews on one hypothesis or topic tag. Like Hypothesis
-  Status, this only retrieves and organizes what was already said —
+  Findings, this only retrieves and organizes what was already said —
   never an AI-written "here's the contrast" summary.
 - **Chat** — a real conversation over the whole corpus, unlike Hypothesis
-  Status/Search & Compare's zero-synthesis retrieval. Every message sends
+  Findings/Search & Compare's zero-synthesis retrieval. Every message sends
   the full hypothesis tree, people roster, document list, and every
   interview's raw transcript + Additional Notes + complete analysis (not
   just its digest) as context (`ai.build_corpus_context`) — cached after
@@ -120,7 +130,7 @@ and past runs — works with no key.
   value tied to a widget's `key=` (like the Settings page's input) is
   only kept in session_state while that widget is being rendered —
   reading the file directly is what makes every page see the same key.
-- `people_export.py` — builds the People page's Excel export
+- `people_export.py` — builds the Metadata page's Excel export
   (`build_people_excel`). A plain function with no Streamlit dependency,
   so it's directly unit-testable; the page just calls it and hands the
   bytes to `st.download_button`.
@@ -155,7 +165,7 @@ Hypothesis selection is a checklist sourced directly from the hypothesis
 tree (on both Process Interview and the Interviews page's rerun control),
 and a single run can test one or more hypotheses at once. Each digest
 entry records the exact hypothesis text it was tested against, so the
-Hypothesis Status and Search & Compare pages can match a run's verdict
+Hypothesis Findings and Search & Compare pages can match a run's verdict
 back to the right tree node (case/whitespace-normalized, still exact —
 not fuzzy — to avoid attributing evidence to the wrong hypothesis) even
 when a run tested several hypotheses in one pass.
@@ -201,8 +211,10 @@ Use the sidebar to navigate between pages.
 3. Go to **Process Interview** to run a real analysis, or **Interviews**
    to rerun a saved one against a different hypothesis.
 
-Without a key, every other page still works fully (Hypotheses, Documents,
-People, browsing past Interviews) — you just can't trigger new AI calls.
+Without a key, every other page still works fully for browsing/editing/
+deleting (Hypotheses, Documents, Metadata, past Interviews) — you just
+can't trigger new AI calls, which includes Chat and the Hypotheses
+page's "Suggest hypotheses" button.
 
 ## Backups
 

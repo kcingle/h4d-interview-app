@@ -43,6 +43,38 @@ if selected.get("notes"):
     with st.expander("Additional notes"):
         st.text(selected["notes"])
 
+interview_id_for_delete = selected["id"]
+if not st.session_state.get(f"confirm_delete_interview_{interview_id_for_delete}"):
+    if st.button("🗑️ Delete this interview", key=f"delete_interview_btn_{interview_id_for_delete}"):
+        st.session_state[f"confirm_delete_interview_{interview_id_for_delete}"] = True
+        st.rerun()
+else:
+    st.warning(
+        "This cannot be undone and deletes every run this interview has "
+        "(the linked person, if any, is kept). Delete this interview permanently?"
+    )
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        confirm_delete_interview = st.button(
+            "Yes, permanently delete", key=f"confirm_delete_interview_btn_{interview_id_for_delete}"
+        )
+    with dc2:
+        cancel_delete_interview = st.button(
+            "Cancel", key=f"cancel_delete_interview_btn_{interview_id_for_delete}"
+        )
+    if confirm_delete_interview:
+        storage.delete_interview(interview_id_for_delete)
+        st.session_state.pop(f"confirm_delete_interview_{interview_id_for_delete}", None)
+        # The previously-selected index may no longer be valid for the
+        # now-shorter interview list — reset it rather than risk a
+        # stale out-of-range selectbox value on rerun.
+        st.session_state.pop("interviews_selectbox", None)
+        st.success("Deleted.")
+        st.rerun()
+    if cancel_delete_interview:
+        st.session_state.pop(f"confirm_delete_interview_{interview_id_for_delete}", None)
+        st.rerun()
+
 st.divider()
 st.subheader("Past runs")
 

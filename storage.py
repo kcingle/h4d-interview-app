@@ -499,6 +499,12 @@ def get_person_for_interview(interview_id: int) -> dict | None:
 ALLOWED_HYPOTHESIS_STATES = ("active", "dormant")
 
 
+class HypothesisError(Exception):
+    """Raised when a hypothesis operation is refused — deleting a node
+    that still has children. Pages should catch this and show
+    st.error(str(e))."""
+
+
 def _next_root_label(conn: sqlite3.Connection) -> str:
     """Next unused integer label among root (family-head) nodes."""
     rows = conn.execute("SELECT label FROM hypotheses WHERE parent_id IS NULL").fetchall()
@@ -612,6 +618,29 @@ def edit_hypothesis_text(hypothesis_id: int, text: str) -> None:
     conn = get_connection()
     try:
         conn.execute("UPDATE hypotheses SET statement = ? WHERE id = ?", (text, hypothesis_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_hypothesis(hypothesis_id: int) -> None:
+    """Permanently delete one hypothesis node. REFUSES if it still has
+    children — delete (or reparent, once that exists) those first,
+    rather than silently cascading a whole subtree away from one click.
+    Runs that tested this hypothesis are unaffected: the hypothesis text
+    is stored verbatim on each run, not as a foreign key, so deleting the
+    tree node doesn't touch run history — it just stops matching a tree
+    node on the Hypothesis Findings/Search & Compare pages."""
+    conn = get_connection()
+    try:
+        children = conn.execute(
+            "SELECT COUNT(*) FROM hypotheses WHERE parent_id = ?", (hypothesis_id,)
+        ).fetchone()[0]
+        if children:
+            raise HypothesisError(
+                "This hypothesis still has sub-hypotheses under it — delete those first."
+            )
+        conn.execute("DELETE FROM hypotheses WHERE id = ?", (hypothesis_id,))
         conn.commit()
     finally:
         conn.close()
@@ -957,6 +986,23 @@ def update_run_digest(run_id: int, digest: dict) -> None:
         conn.close()
 
 
+def delete_interview(interview_id: int) -> None:
+    """Permanently delete one interview AND every run it has (there's no
+    meaningful "runs of a deleted interview" state to keep). The linked
+    person record, if any, is left alone — a person can be linked to
+    other interviews and is managed independently on the Metadata page.
+    Deletes runs before the interview row itself, since foreign keys are
+    enforced (PRAGMA foreign_keys = ON) and runs.interview_id references
+    interviews.id."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM runs WHERE interview_id = ?", (interview_id,))
+        conn.execute("DELETE FROM interviews WHERE id = ?", (interview_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # People — real, working (Step 6; extended with rank/branch/status)
 # ---------------------------------------------------------------------------
@@ -1001,8 +1047,8 @@ def add_person(
 
 def _attach_interviews(conn: sqlite3.Connection, person: dict) -> dict:
     """Attach the list of interviews linked to this person (via
-    interviews.person_id), so the People page can show "their interview(s)
-    and its runs" without a separate query per caller."""
+    interviews.person_id), so the Metadata page can show "their
+    interview(s) and its runs" without a separate query per caller."""
     rows = conn.execute(
         "SELECT id, title, created_at FROM interviews WHERE person_id = ? "
         "ORDER BY created_at ASC",
@@ -1051,7 +1097,7 @@ def update_person(
     branch_service: str = "",
     interview_status: str = "completed",
 ) -> None:
-    """Update a person's fields in place. Edits made on the People page
+    """Update a person's fields in place. Edits made on the Metadata page
     persist via this function."""
     conn = get_connection()
     try:
@@ -1075,6 +1121,20 @@ def set_interview_person(interview_id: int, person_id: int) -> None:
         conn.execute(
             "UPDATE interviews SET person_id = ? WHERE id = ?", (person_id, interview_id)
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_person(person_id: int) -> None:
+    """Permanently delete one person. Any interview(s) linked to them
+    have their person_id cleared back to "not recorded" first (foreign
+    keys are enforced) — the interview itself, and its runs, are never
+    touched by deleting a person."""
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE interviews SET person_id = NULL WHERE person_id = ?", (person_id,))
+        conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
         conn.commit()
     finally:
         conn.close()

@@ -76,7 +76,7 @@ def render_node(node: dict, depth: int) -> None:
     else:
         st.markdown(f"{indent}**{node['label']}** — {node['text']}", unsafe_allow_html=True)
 
-    b1, b2, b3, _ = st.columns([1, 1, 1, 3])
+    b1, b2, b3, b4 = st.columns([1, 1, 1, 1])
     with b1:
         add_child_clicked = st.button("➕ Add child", key=f"add_child_btn_{node['id']}")
     with b2:
@@ -84,6 +84,8 @@ def render_node(node: dict, depth: int) -> None:
     with b3:
         toggle_label = "Set dormant" if not is_dormant else "Set active"
         toggle_clicked = st.button(toggle_label, key=f"toggle_btn_{node['id']}")
+    with b4:
+        delete_clicked = st.button("🗑️ Delete", key=f"delete_btn_{node['id']}")
 
     if toggle_clicked:
         storage.set_hypothesis_state(node["id"], "dormant" if not is_dormant else "active")
@@ -93,11 +95,17 @@ def render_node(node: dict, depth: int) -> None:
         st.session_state[f"show_add_child_{node['id']}"] = True
     if edit_clicked:
         st.session_state[f"show_edit_{node['id']}"] = True
+    if delete_clicked:
+        st.session_state[f"show_delete_confirm_{node['id']}"] = True
 
     if st.session_state.get(f"show_add_child_{node['id']}"):
         with st.form(f"add_child_form_{node['id']}"):
             child_text = st.text_area("New child hypothesis text", key=f"child_text_{node['id']}")
-            submitted = st.form_submit_button("Save child")
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                submitted = st.form_submit_button("Save child")
+            with fc2:
+                cancelled_add = st.form_submit_button("Cancel")
         if submitted:
             if child_text.strip():
                 storage.add_hypothesis(node["id"], child_text.strip())
@@ -105,11 +113,18 @@ def render_node(node: dict, depth: int) -> None:
                 st.rerun()
             else:
                 st.warning("Enter some text for the new child hypothesis.")
+        if cancelled_add:
+            st.session_state[f"show_add_child_{node['id']}"] = False
+            st.rerun()
 
     if st.session_state.get(f"show_edit_{node['id']}"):
         with st.form(f"edit_form_{node['id']}"):
             new_text = st.text_area("Edit text", value=node["text"], key=f"edit_text_{node['id']}")
-            submitted_edit = st.form_submit_button("Save edit")
+            fe1, fe2 = st.columns(2)
+            with fe1:
+                submitted_edit = st.form_submit_button("Save edit")
+            with fe2:
+                cancelled_edit = st.form_submit_button("Cancel")
         if submitted_edit:
             if new_text.strip():
                 storage.edit_hypothesis_text(node["id"], new_text.strip())
@@ -117,6 +132,39 @@ def render_node(node: dict, depth: int) -> None:
                 st.rerun()
             else:
                 st.warning("Hypothesis text can't be empty.")
+        if cancelled_edit:
+            st.session_state[f"show_edit_{node['id']}"] = False
+            st.rerun()
+
+    if st.session_state.get(f"show_delete_confirm_{node['id']}"):
+        if node["children"]:
+            st.warning(
+                "This hypothesis still has sub-hypotheses under it — delete "
+                "those first."
+            )
+            if st.button("OK", key=f"delete_blocked_ok_{node['id']}"):
+                st.session_state[f"show_delete_confirm_{node['id']}"] = False
+                st.rerun()
+        else:
+            st.error(f'This cannot be undone. Delete "{node["label"]}" permanently?')
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                confirm_delete = st.button(
+                    "Yes, permanently delete", key=f"confirm_delete_btn_{node['id']}"
+                )
+            with dc2:
+                cancel_delete = st.button("Cancel", key=f"cancel_delete_btn_{node['id']}")
+            if confirm_delete:
+                try:
+                    storage.delete_hypothesis(node["id"])
+                    st.session_state.pop(f"show_delete_confirm_{node['id']}", None)
+                    st.success("Deleted.")
+                    st.rerun()
+                except storage.HypothesisError as e:
+                    st.error(str(e))
+            if cancel_delete:
+                st.session_state.pop(f"show_delete_confirm_{node['id']}", None)
+                st.rerun()
 
     for child in node["children"]:
         render_node(child, depth + 1)

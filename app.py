@@ -216,7 +216,7 @@ if st.session_state.flow_stage == "done" and "step2_result" in st.session_state:
                 st.session_state.metadata_suggestion = ai.suggest_metadata(raw_notes, api_key)
 
         if st.session_state.get("metadata_saved"):
-            st.success("Metadata saved. View it on the People page.")
+            st.success("Metadata saved. View it on the Metadata page.")
         else:
             suggestion = st.session_state.metadata_suggestion
             with st.form("metadata_form"):

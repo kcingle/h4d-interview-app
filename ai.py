@@ -641,7 +641,7 @@ def build_digest(
     per hypothesis tested," in the same order) — each digest entry then
     carries the exact tested string in its "hypothesis" field (not just
     the model's own "claim" restatement), which is what later cross-run
-    matching (Hypothesis Status, Compare) keys off. If the model produced
+    matching (Hypothesis Findings, Compare) keys off. If the model produced
     fewer ledger rows than hypotheses tested, the missing ones are marked
     Untested with no quotes rather than guessing which is missing — same
     anti-fabrication rule as everywhere else in this digest.
@@ -713,7 +713,7 @@ def build_digest(
 
 # ---------------------------------------------------------------------------
 # Chat — talks about the WHOLE corpus, not one interview. A different kind
-# of feature from everything above: Hypothesis Status and Search & Compare
+# of feature from everything above: Hypothesis Findings and Search & Compare
 # deliberately do zero AI synthesis (pure retrieval), but a chat is
 # inherently synthesis. The anti-fabrication rule still applies, just
 # enforced through the system prompt's instructions (cite the interview a
