@@ -13,6 +13,7 @@ import datetime
 import streamlit as st
 
 import ai
+import auth
 import env_store
 import storage
 from render import build_export_header, render_analysis, render_hypothesis_picker
@@ -21,6 +22,7 @@ RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
 INTERVIEW_STATUS_OPTIONS = list(storage.ALLOWED_INTERVIEW_STATUSES)
 
 st.set_page_config(page_title="H4D Interview App — Interviews", page_icon="🗂️")
+auth.require_login()
 
 st.title("Interviews")
 

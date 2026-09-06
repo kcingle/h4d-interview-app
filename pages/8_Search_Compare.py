@@ -10,9 +10,11 @@ is exactly the fabrication risk this project exists to prevent.
 
 import streamlit as st
 
+import auth
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Search & Compare", page_icon="🔍")
+auth.require_login()
 
 st.title("Search & Compare")
 st.caption(

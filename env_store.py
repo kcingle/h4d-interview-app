@@ -1,12 +1,16 @@
-"""env_store.py — Local persistence for the Anthropic API key, via a plain
-`.env` file next to the app (gitignored — see .gitignore — so the key is
-never written anywhere committable).
+"""env_store.py — Resolves the Anthropic API key. Reads Streamlit secrets
+(ANTHROPIC_API_KEY) FIRST — that's the deployed/cloud case, set once in
+Streamlit Community Cloud's secrets, server-side only, never on anyone's
+laptop or in the repo — falling back to a plain local `.env` file next
+to the app (gitignored — see .gitignore, never committable) for local
+development, matching storage.py's DATABASE_URL resolution (secrets
+first, then a local fallback) for the same reason.
 
 This is deliberately its OWN module, not part of storage.py: a secret
-like this must never end up in the app's SQLite database — especially
-once/if that database becomes a shared, hosted Postgres instance (see the
-cloud-migration branch) — it belongs to this one local machine only, not
-to whatever data store the rest of the app persists to.
+like this must never end up in the app's database — especially now that
+it can be a shared, hosted Postgres instance (see the cloud-migration
+branch) — it's either a per-deployment server secret or a per-machine
+local file, never data the rest of the app persists to.
 
 Why every page calls load_api_key() instead of reading st.session_state:
 a value tied to a widget's `key=` (like the Settings page's API key
@@ -14,7 +18,7 @@ input) is only kept in Streamlit's session_state WHILE that widget is
 actually being rendered — navigating to a page that doesn't render that
 same widget drops it. That's the actual root cause of "Settings says the
 key is set, but every other page says it's missing": the key never made
-it anywhere those other pages could see it. Reading it from this file
+it anywhere those other pages could see it. Reading it from secrets/file
 instead sidesteps that entirely (and is what makes the key survive an
 app restart, not just a page switch).
 
@@ -29,8 +33,17 @@ _KEY_NAME = "ANTHROPIC_API_KEY"
 
 
 def load_api_key() -> str:
-    """Read the saved API key from .env. Returns "" if no file, no line
-    for it, or the file can't be read — never raises."""
+    """Resolve the API key: Streamlit secrets first (deployed case),
+    then the local .env file (local dev case). Returns "" if neither
+    has it, the file doesn't exist, or it can't be read — never raises,
+    so a missing key just shows as "not set" rather than crashing."""
+    try:
+        import streamlit as st
+        if _KEY_NAME in st.secrets:
+            return st.secrets[_KEY_NAME]
+    except Exception:
+        pass
+
     if not ENV_PATH.exists():
         return ""
     try:

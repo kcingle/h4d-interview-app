@@ -7,9 +7,11 @@ replaceable via upload, but never deletable).
 
 import streamlit as st
 
+import auth
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Documents", page_icon="📄")
+auth.require_login()
 
 st.title("Documents")
 st.caption(

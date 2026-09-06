@@ -26,11 +26,13 @@ import datetime
 import streamlit as st
 
 import ai
+import auth
 import env_store
 import storage
 from render import render_hypothesis_picker
 
 st.set_page_config(page_title="H4D Interview App — Process Interview", page_icon="🎙️")
+auth.require_login()
 
 st.title("Process Interview")
 st.caption("Paste raw interview notes, then run the two-step AI analysis below.")

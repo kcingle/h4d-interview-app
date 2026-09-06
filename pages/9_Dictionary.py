@@ -8,9 +8,11 @@ what's already saved: search, mark important, and delete — no AI calls.
 
 import streamlit as st
 
+import auth
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Dictionary", page_icon="📖")
+auth.require_login()
 
 st.title("Dictionary")
 st.caption(

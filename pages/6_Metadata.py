@@ -10,6 +10,7 @@ the (filtered) roster — see people_export.build_people_excel.
 
 import streamlit as st
 
+import auth
 import people_export
 import storage
 from render import build_export_header, render_analysis
@@ -19,6 +20,7 @@ INTERVIEW_STATUS_OPTIONS = list(storage.ALLOWED_INTERVIEW_STATUSES)
 ALL_OPTION = "All"
 
 st.set_page_config(page_title="H4D Interview App — Metadata", page_icon="🧑‍🤝‍🧑")
+auth.require_login()
 
 st.title("Metadata")
 st.caption("Everyone interviewed, with metadata confirmed on the Process Interview page.")

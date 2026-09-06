@@ -20,10 +20,12 @@ not just the corpus. Anything it defines can be saved to the Dictionary
 import streamlit as st
 
 import ai
+import auth
 import env_store
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Chat", page_icon="💬")
+auth.require_login()
 
 st.title("Chat")
 

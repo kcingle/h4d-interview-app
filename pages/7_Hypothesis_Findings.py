@@ -16,9 +16,11 @@ storage._normalize_hypothesis_text for why this isn't fuzzy.
 
 import streamlit as st
 
+import auth
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Hypothesis Findings", page_icon="📊")
+auth.require_login()
 
 st.title("Hypothesis Findings")
 st.caption(

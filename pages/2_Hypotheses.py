@@ -25,10 +25,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import ai
+import auth
 import env_store
 import storage
 
 st.set_page_config(page_title="H4D Interview App — Hypotheses", page_icon="🧩")
+auth.require_login()
 
 st.title("Hypotheses")
 st.caption(
