@@ -48,6 +48,11 @@ selected = interviews[selected_idx]
 interview_id = selected["id"]
 interview_person = storage.get_person_for_interview(interview_id)
 
+media_upload_errors = st.session_state.pop("media_upload_errors", None)
+if media_upload_errors:
+    for msg in media_upload_errors:
+        st.warning(msg)
+
 st.subheader(selected["title"])
 st.caption(f"Saved {selected['created_at']}")
 with st.expander("Raw interview notes"):

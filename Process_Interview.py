@@ -102,6 +102,28 @@ additional_notes = st.text_area(
     ),
 )
 
+st.subheader("Photos, videos & other media (optional)")
+_media_max_mb = storage.VISUAL_RESOURCE_MAX_BYTES / (1024 * 1024)
+st.caption(
+    f"Whiteboard photos, screen recordings, short clips — anything visual "
+    f"from this interview. Saved the moment this interview saves, and "
+    f"browsable later on the Visual Resources page. {_media_max_mb:.0f} MB max per file."
+)
+uploaded_media = st.file_uploader(
+    "Upload photos, videos, or other files",
+    type=[
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tiff", "svg",
+        "mp4", "mov", "webm", "avi", "m4v", "mkv", "3gp",
+    ],
+    accept_multiple_files=True,
+    key="media_uploader",
+)
+media_caption = st.text_input(
+    "Caption for these files (optional — applies to everything uploaded "
+    "above; edit individually later on Visual Resources)",
+    key="media_caption",
+)
+
 if "flow_stage" not in st.session_state:
     st.session_state.flow_stage = "idle"
 
@@ -115,6 +137,15 @@ if start_clicked:
     # conversation sees the same reference material and hypotheses.
     st.session_state.selected_documents = selected_documents
     st.session_state.selected_hypotheses = selected_hypotheses
+    # Read each file's bytes now, at Start time, rather than re-reading the
+    # file_uploader widget after the clarifying-questions round trip below —
+    # same reasoning as freezing selected_documents/selected_hypotheses
+    # above: an UploadedFile's read position is also good for one read only.
+    st.session_state.pending_media = [
+        (f.name, f.getvalue(), f.type or "application/octet-stream")
+        for f in (uploaded_media or [])
+    ]
+    st.session_state.pending_media_caption = media_caption.strip()
     try:
         with st.spinner("Asking clarifying questions..."):
             step1 = ai.run_step1(
@@ -184,6 +215,25 @@ if st.session_state.flow_stage == "awaiting_answers":
                 digest,
                 document_ids=document_ids,
             )
+
+            # Save any uploaded media against this interview. A file over
+            # the size cap doesn't block the interview itself from saving —
+            # that analysis work is done and shouldn't be lost over one
+            # oversized upload — it's just skipped, with the reason handed
+            # to the Interviews page below to show once we land there.
+            media_errors = []
+            for filename, content, mime_type in st.session_state.get("pending_media", []):
+                try:
+                    storage.add_visual_resource(
+                        interview_id, filename, content, mime_type,
+                        caption=st.session_state.get("pending_media_caption", ""),
+                    )
+                except storage.VisualResourceError as e:
+                    media_errors.append(str(e))
+            st.session_state.pop("pending_media", None)
+            st.session_state.pop("pending_media_caption", None)
+            if media_errors:
+                st.session_state["media_upload_errors"] = media_errors
 
             # Hand off IMMEDIATELY to the Interviews page for this one
             # interview — that's where the full synthesis (Mom Test

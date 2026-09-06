@@ -134,6 +134,8 @@ def init_db() -> None:
       - documents: reference docs, incl. a pinned Mom Test doc.
       - dictionary_entries: terms/acronyms saved from Chat's Background &
         Definitions tab.
+      - visual_resources: photos/videos/other media uploaded alongside an
+        interview on Process Interview, browsed on Visual Resources.
     """
     conn = get_connection()
     try:
@@ -203,6 +205,18 @@ def init_db() -> None:
                 is_acronym INTEGER NOT NULL DEFAULT 0,
                 expansion TEXT,
                 is_important INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS visual_resources (
+                id SERIAL PRIMARY KEY,
+                interview_id INTEGER NOT NULL REFERENCES interviews (id),
+                filename TEXT NOT NULL,
+                caption TEXT NOT NULL DEFAULT '',
+                media_kind TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                file_size_bytes INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
             """
@@ -830,16 +844,18 @@ def update_run_digest(run_id: int, digest: dict) -> None:
 
 
 def delete_interview(interview_id: int) -> None:
-    """Permanently delete one interview AND every run it has (there's no
-    meaningful "runs of a deleted interview" state to keep). The linked
-    person record, if any, is left alone — a person can be linked to
-    other interviews and is managed independently on the Metadata page.
-    Deletes runs before the interview row itself, since foreign keys are
-    enforced and runs.interview_id references interviews.id."""
+    """Permanently delete one interview AND every run and visual resource
+    it has (there's no meaningful "runs/media of a deleted interview"
+    state to keep). The linked person record, if any, is left alone — a
+    person can be linked to other interviews and is managed independently
+    on the Metadata page. Deletes runs and visual_resources before the
+    interview row itself, since foreign keys are enforced and both
+    reference interviews.id."""
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute("DELETE FROM runs WHERE interview_id = %s", (interview_id,))
+        cur.execute("DELETE FROM visual_resources WHERE interview_id = %s", (interview_id,))
         cur.execute("DELETE FROM interviews WHERE id = %s", (interview_id,))
         conn.commit()
     finally:
@@ -1240,6 +1256,131 @@ def delete_dictionary_entry(entry_id: int) -> None:
     try:
         cur = conn.cursor()
         cur.execute("DELETE FROM dictionary_entries WHERE id = %s", (entry_id,))
+        conn.commit()
+    finally:
+        release_connection(conn)
+
+
+# ---------------------------------------------------------------------------
+# Visual resources — photos, videos, and other media uploaded alongside an
+# interview on Process Interview, browsed and searched on Visual Resources.
+# Stored the same way the Mom Test PDF is (base64 text in a TEXT column) —
+# consistent with the rest of this file rather than introducing a second,
+# BYTEA-based convention just for this table.
+# ---------------------------------------------------------------------------
+
+VISUAL_RESOURCE_MAX_BYTES = 25 * 1024 * 1024  # 25 MB/file — see the size-cap
+# note in the commit that added this: Neon's free tier caps the WHOLE
+# project's storage at 0.5 GB, shared with every other table, so this is
+# deliberately conservative rather than Streamlit's own 200 MB default.
+
+_IMAGE_MIME_PREFIXES = ("image/",)
+_VIDEO_MIME_PREFIXES = ("video/",)
+
+
+class VisualResourceError(Exception):
+    """Raised when a visual-resource upload is refused — currently just
+    the size cap. Pages should catch this and show st.error(str(e))."""
+
+
+def _media_kind_from_mime(mime_type: str) -> str:
+    """Bucket a MIME type into "image", "video", or "other" — drives which
+    widget the Visual Resources page renders (st.image / st.video /
+    download-only card)."""
+    mime_type = (mime_type or "").lower()
+    if mime_type.startswith(_IMAGE_MIME_PREFIXES):
+        return "image"
+    if mime_type.startswith(_VIDEO_MIME_PREFIXES):
+        return "video"
+    return "other"
+
+
+def add_visual_resource(
+    interview_id: int, filename: str, content: bytes, mime_type: str, caption: str = ""
+) -> int:
+    """Save one uploaded file against an interview and return its id.
+    Raises VisualResourceError if it's over VISUAL_RESOURCE_MAX_BYTES —
+    checked here (not just in the file_uploader widget's `type` filter,
+    which only restricts extensions, not size) so the limit holds no
+    matter which page ends up calling this."""
+    size = len(content)
+    if size > VISUAL_RESOURCE_MAX_BYTES:
+        limit_mb = VISUAL_RESOURCE_MAX_BYTES / (1024 * 1024)
+        actual_mb = size / (1024 * 1024)
+        raise VisualResourceError(
+            f'"{filename}" is {actual_mb:.1f} MB, over the {limit_mb:.0f} MB '
+            "per-file limit. Trim it down (or compress the video) and try again."
+        )
+    conn = get_connection()
+    try:
+        cur = _dict_cursor(conn)
+        cur.execute(
+            "INSERT INTO visual_resources "
+            "(interview_id, filename, caption, media_kind, mime_type, content, "
+            "file_size_bytes, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                interview_id, filename, caption.strip(),
+                _media_kind_from_mime(mime_type), mime_type,
+                base64.standard_b64encode(content).decode("utf-8"),
+                size, _now(),
+            ),
+        )
+        new_id = cur.fetchone()["id"]
+        conn.commit()
+        return new_id
+    finally:
+        release_connection(conn)
+
+
+def get_visual_resources() -> list[dict]:
+    """Return every uploaded photo/video/other file, newest first, each
+    with its interview's title attached (so the Visual Resources page can
+    show and search on it without a separate lookup per item). "content"
+    comes back as raw bytes, ready for st.image/st.video/st.download_button.
+    Filtering by search text happens page-side, same convention as the
+    Metadata and Dictionary pages."""
+    conn = get_connection()
+    try:
+        cur = _dict_cursor(conn)
+        cur.execute(
+            "SELECT vr.id, vr.interview_id, vr.filename, vr.caption, vr.media_kind, "
+            "vr.mime_type, vr.content, vr.file_size_bytes, vr.created_at, "
+            "i.title AS interview_title "
+            "FROM visual_resources vr JOIN interviews i ON i.id = vr.interview_id "
+            "ORDER BY vr.created_at DESC"
+        )
+        rows = []
+        for row in cur.fetchall():
+            row = dict(row)
+            row["content"] = base64.standard_b64decode(row["content"])
+            rows.append(row)
+        return rows
+    finally:
+        release_connection(conn)
+
+
+def delete_visual_resource(resource_id: int) -> None:
+    """Permanently delete one uploaded file."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM visual_resources WHERE id = %s", (resource_id,))
+        conn.commit()
+    finally:
+        release_connection(conn)
+
+
+def update_visual_resource_caption(resource_id: int, caption: str) -> None:
+    """Edit a saved file's caption after the fact — e.g. to add context
+    that wasn't obvious at upload time."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE visual_resources SET caption = %s WHERE id = %s",
+            (caption.strip(), resource_id),
+        )
         conn.commit()
     finally:
         release_connection(conn)
