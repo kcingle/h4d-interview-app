@@ -1,11 +1,16 @@
 """
-pages/6_People.py — Browsable table of everyone interviewed. Selecting a
-person shows their editable metadata plus their linked interview(s) and
-each interview's runs (reusing the same table rendering as elsewhere).
+pages/6_Metadata.py — Browsable table of everyone interviewed (formerly
+"People" — renamed for clarity, since this page is specifically the
+interviewee METADATA confirmed on Process Interview, not a general
+contacts list). Selecting a person shows their editable metadata plus
+their linked interview(s) and each interview's runs (reusing the same
+table rendering as elsewhere). Also offers a one-click Excel export of
+the (filtered) roster — see people_export.build_people_excel.
 """
 
 import streamlit as st
 
+import people_export
 import storage
 from render import build_export_header, render_analysis
 
@@ -13,9 +18,9 @@ RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
 INTERVIEW_STATUS_OPTIONS = list(storage.ALLOWED_INTERVIEW_STATUSES)
 ALL_OPTION = "All"
 
-st.set_page_config(page_title="H4D Interview App — People", page_icon="🧑‍🤝‍🧑")
+st.set_page_config(page_title="H4D Interview App — Metadata", page_icon="🧑‍🤝‍🧑")
 
-st.title("People")
+st.title("Metadata")
 st.caption("Everyone interviewed, with metadata confirmed on the Process Interview page.")
 
 people = storage.get_people()
@@ -62,6 +67,7 @@ st.dataframe(
             "Interview status": p["interview_status"],
             "Interview date": p["interview_date"],
             "Descriptor": p["descriptor"],
+            "Interviewer(s)": ", ".join(p["interviewers"]),
         }
         for p in filtered_people
     ],
@@ -72,6 +78,14 @@ st.caption("Click a column header above to sort.")
 if not filtered_people:
     st.info("No people match the current filters.")
     st.stop()
+
+st.download_button(
+    "📊 Export to Excel",
+    data=people_export.build_people_excel(filtered_people),
+    file_name="people.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Downloads the table above (respecting the filters set here) as a .xlsx file.",
+)
 
 st.divider()
 st.subheader("View / edit a person")
@@ -109,6 +123,21 @@ with st.form(f"edit_person_form_{person_id}"):
         if current_status in INTERVIEW_STATUS_OPTIONS else INTERVIEW_STATUS_OPTIONS.index("completed"),
     )
     e_descriptor = st.text_input("One-line descriptor", value=selected["descriptor"] or "")
+
+    st.caption("Interviewer(s) — up to 5. One name per box; leave extras blank.")
+    existing_interviewers = selected["interviewers"] + [""] * 5
+    ic1, ic2, ic3, ic4, ic5 = st.columns(5)
+    with ic1:
+        e_interviewer_1 = st.text_input("Interviewer 1", value=existing_interviewers[0])
+    with ic2:
+        e_interviewer_2 = st.text_input("Interviewer 2", value=existing_interviewers[1])
+    with ic3:
+        e_interviewer_3 = st.text_input("Interviewer 3", value=existing_interviewers[2])
+    with ic4:
+        e_interviewer_4 = st.text_input("Interviewer 4", value=existing_interviewers[3])
+    with ic5:
+        e_interviewer_5 = st.text_input("Interviewer 5", value=existing_interviewers[4])
+
     save_edit = st.form_submit_button("Save changes")
 
 if save_edit:
@@ -124,9 +153,38 @@ if save_edit:
         rank=e_rank.strip(),
         branch_service=e_branch.strip(),
         interview_status=e_status,
+        interviewers=[
+            e_interviewer_1, e_interviewer_2, e_interviewer_3,
+            e_interviewer_4, e_interviewer_5,
+        ],
     )
     st.success("Saved.")
     st.rerun()
+
+if not st.session_state.get(f"confirm_delete_person_{person_id}"):
+    if st.button("🗑️ Delete this person", key=f"delete_person_btn_{person_id}"):
+        st.session_state[f"confirm_delete_person_{person_id}"] = True
+        st.rerun()
+else:
+    st.warning(
+        "This cannot be undone. Any interview(s) linked to them are kept, just "
+        "no longer linked to a person. Delete this person permanently?"
+    )
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        confirm_delete_person = st.button(
+            "Yes, permanently delete", key=f"confirm_delete_person_btn_{person_id}"
+        )
+    with dc2:
+        cancel_delete_person = st.button("Cancel", key=f"cancel_delete_person_btn_{person_id}")
+    if confirm_delete_person:
+        storage.delete_person(person_id)
+        st.session_state.pop(f"confirm_delete_person_{person_id}", None)
+        st.success("Deleted.")
+        st.rerun()
+    if cancel_delete_person:
+        st.session_state.pop(f"confirm_delete_person_{person_id}", None)
+        st.rerun()
 
 st.divider()
 st.subheader("Linked interview(s)")
@@ -144,6 +202,9 @@ else:
         # per-run expander).
         with st.container(border=True):
             st.markdown(f"**{interview['title']}** — {when}")
+            if interview.get("notes"):
+                st.caption("Additional notes:")
+                st.caption(interview["notes"])
             runs = storage.get_runs_for_interview(interview["id"])
             if not runs:
                 st.write("No runs yet for this interview.")

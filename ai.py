@@ -19,6 +19,11 @@ import re
 import anthropic
 
 import config
+import render  # only for build_markdown_report, reused by build_corpus_context
+# below so the Chat page's per-run context matches the exact same
+# Mom Test/pains-and-gains/hypothesis-ledger/etc. formatting the rest of
+# the app already shows. render.py makes no persistence or AI calls of
+# its own, so this doesn't create a cycle back into this module.
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -140,7 +145,7 @@ def _build_user_message_content(user_text: str, documents: list[dict] | None):
 # JSON schemas — plumbing only. These control how the response is
 # structured for rendering; they do not change what the model is asked to
 # do (that's entirely the system prompt above). Rendered table headers in
-# app.py use the exact strings from the prompt, not these field names.
+# render.py use the exact strings from the prompt, not these field names.
 # ---------------------------------------------------------------------------
 
 CLARIFYING_QUESTIONS_SCHEMA = {
@@ -149,7 +154,12 @@ CLARIFYING_QUESTIONS_SCHEMA = {
         "questions": {
             "type": "array",
             "items": {"type": "string"},
-            "maxItems": 3,
+            # No "maxItems" here — Claude's structured-output schema doesn't
+            # support array size constraints (a live call with one returns a
+            # 400: "For 'array' type, property 'maxItems' is not
+            # supported"). The "up to three" limit is already in
+            # SYSTEM_PROMPT's instructions; run_step1 below also truncates
+            # to 3 in code as a safety net, never padding if there are fewer.
         }
     },
     "required": ["questions"],
@@ -213,8 +223,11 @@ ANALYSIS_SCHEMA = {
         "sharper_questions": {
             "type": "array",
             "items": {"type": "string"},
-            "minItems": 3,
-            "maxItems": 3,
+            # No "minItems"/"maxItems" — same unsupported-keyword issue as
+            # CLARIFYING_QUESTIONS_SCHEMA above. SYSTEM_PROMPT already asks
+            # for exactly three; run_step2 below truncates to 3 in code if
+            # the model ever returns more, and leaves it alone (never pads)
+            # if it returns fewer.
         },
         "slack_writeup": {
             "type": "object",
@@ -262,17 +275,35 @@ def _client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
-def _call(client: anthropic.Anthropic, messages: list[dict], schema: dict, system):
-    """Shared call wrapper: same model/schema plumbing, one error-handling
-    chain for both steps of the flow."""
+def _call(
+    client: anthropic.Anthropic,
+    messages: list[dict],
+    system,
+    schema: dict | None = None,
+    max_tokens: int = 16000,
+):
+    """Shared call wrapper: same model plumbing, one error-handling chain
+    for every call site. `schema` (optional) adds output_config for a
+    structured-output call (the two-step analysis); omit it for a
+    free-form text call (chat).
+
+    `max_tokens` defaults to 16000, not a smaller number: the current
+    model runs adaptive (extended) thinking by default with no opt-out
+    needed, and thinking tokens count against this SAME cap. On a short
+    call the model finishes with plenty of room to spare, but on a
+    longer/more complex one (a long transcript, several hypotheses to
+    judge), thinking alone can consume the entire budget before any
+    visible output is written — the response then ends with a
+    `thinking` block and zero `text` blocks, which used to surface as
+    an opaque "didn't contain the expected structured output" error
+    that had nothing to do with the schema. See _extract_json/
+    _extract_text for how that failure is now actually diagnosable.
+    """
+    kwargs = dict(model=config.MODEL_NAME, max_tokens=max_tokens, system=system, messages=messages)
+    if schema is not None:
+        kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
     try:
-        return client.messages.create(
-            model=config.MODEL_NAME,
-            max_tokens=8000,
-            system=system,
-            messages=messages,
-            output_config={"format": {"type": "json_schema", "schema": schema}},
-        )
+        return client.messages.create(**kwargs)
     except anthropic.AuthenticationError:
         raise AIError(
             "Your Anthropic API key was rejected. Check it on the Settings page."
@@ -287,15 +318,47 @@ def _call(client: anthropic.Anthropic, messages: list[dict], schema: dict, syste
         raise AIError(f"Unexpected error while calling the AI: {e}")
 
 
+def _no_text_error(response) -> "AIError":
+    """Build a diagnosable error for a response with zero text blocks —
+    e.g. the model ran out of max_tokens mid-thinking, before writing
+    any visible output. Reports stop_reason and what blocks WERE
+    present (never just "didn't contain the expected output") so this
+    is debuggable from the error message alone, no raw-logging needed."""
+    block_summary = ", ".join(b.type for b in response.content) or "(no content blocks at all)"
+    stop_reason = getattr(response, "stop_reason", "unknown")
+    hint = (
+        " This usually means the model ran out of its output-token budget "
+        "while still thinking, before writing any answer — try again, and "
+        "if it keeps happening on this same interview, it may need a "
+        "larger max_tokens."
+        if stop_reason == "max_tokens"
+        else ""
+    )
+    return AIError(
+        f"The AI response had no text output to read (stop_reason={stop_reason!r}, "
+        f"content blocks: {block_summary}).{hint}"
+    )
+
+
 def _extract_json(response) -> dict:
-    try:
-        text = next(block.text for block in response.content if block.type == "text")
-    except StopIteration:
-        raise AIError("The AI response didn't contain the expected structured output.")
+    text_blocks = [b.text for b in response.content if b.type == "text"]
+    if not text_blocks:
+        raise _no_text_error(response)
+    text = text_blocks[0]
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        raise AIError("The AI response could not be parsed as JSON.")
+    except json.JSONDecodeError as e:
+        preview = text if len(text) <= 2000 else f"{text[:1000]}\n...(truncated)...\n{text[-1000:]}"
+        raise AIError(
+            f"The AI's response could not be parsed as JSON ({e}). Raw response:\n{preview}"
+        )
+
+
+def _extract_text(response) -> str:
+    text_blocks = [b.text for b in response.content if b.type == "text"]
+    if not text_blocks:
+        raise _no_text_error(response)
+    return text_blocks[0]
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +367,25 @@ def _extract_json(response) -> dict:
 
 
 def run_step1(
-    hypothesis: str, raw_notes: str, api_key: str, documents: list[dict] | None = None
+    hypotheses: list[str],
+    raw_notes: str,
+    api_key: str,
+    documents: list[dict] | None = None,
+    additional_notes: str = "",
 ) -> dict:
     """Step 1: ask up to three clarifying questions about the interview.
+
+    `hypotheses`: one or more hypotheses being tested this run — the
+    graded SYSTEM_PROMPT above already says "one or more hypotheses"; the
+    app just lists every one of them in the user message below (the
+    prompt text itself never changes based on how many there are).
+
+    `additional_notes` (optional): free-form context the interviewer typed
+    separately from the transcript — nonverbal communication, tone, the
+    setting, or anything else observed but not written as dialogue. Appended
+    to the user message as its own clearly-labeled section (never merged
+    into `raw_notes` itself, so the interview's stored transcript stays
+    exactly what was actually said).
 
     `documents` (Step 5, optional): reference documents to include as
     context — each a dict with at least "title", "content", and
@@ -319,10 +398,18 @@ def run_step1(
     conversation stays intact across both steps.
     """
     client = _client(api_key)
+    hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
     user_text = (
-        f"Hypotheses being tested:\n- {hypothesis}\n\n"
+        f"Hypotheses being tested:\n{hypotheses_block}\n\n"
         f"Raw interview notes:\n{raw_notes}"
     )
+    if additional_notes and additional_notes.strip():
+        user_text += (
+            "\n\nAdditional notes from the interviewer (not part of the "
+            "transcript — e.g. nonverbal communication, tone, body language, "
+            "the setting, or other context observed during the interview):\n"
+            f"{additional_notes.strip()}"
+        )
     user_content = _build_user_message_content(user_text, documents)
     response = _call(
         client,
@@ -333,8 +420,13 @@ def run_step1(
     data = _extract_json(response)
     assistant_text = next(b.text for b in response.content if b.type == "text")
 
+    # Enforce "up to three" in code — the schema itself can't (see
+    # CLARIFYING_QUESTIONS_SCHEMA above). Truncate only; never pad if the
+    # model returns fewer than three.
+    questions = list(data.get("questions", []))[:3]
+
     return {
-        "questions": data.get("questions", []),
+        "questions": questions,
         "history": [
             {"role": "user", "content": user_content},
             {"role": "assistant", "content": assistant_text},
@@ -369,7 +461,14 @@ def run_step2(
     response = _call(
         client, messages=messages, schema=ANALYSIS_SCHEMA, system=_build_system(documents)
     )
-    return _extract_json(response)
+    data = _extract_json(response)
+
+    # Enforce "exactly three" sharper questions in code — the schema
+    # itself can't (see ANALYSIS_SCHEMA above). Truncate only; never pad
+    # with invented questions if the model returns fewer than three.
+    data["sharper_questions"] = list(data.get("sharper_questions", []))[:3]
+
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +558,10 @@ def suggest_metadata(raw_notes: str, api_key: str) -> dict:
 # just trusted a second time.
 # ---------------------------------------------------------------------------
 
-DIGEST_VERSION = 2
+DIGEST_VERSION = 3  # v3: each hypotheses[] entry carries its own exact
+# "hypothesis" string (multi-hypothesis support) alongside the model's
+# "claim" restatement; digest_version >= 2 checks elsewhere in the
+# codebase still correctly treat v3 as "rich" — no code needed updating.
 
 _TOPIC_TAGS_SYSTEM_PROMPT = (
     "You are extracting short topic/keyword tags for a processed DoD "
@@ -473,14 +575,17 @@ _TOPIC_TAGS_SYSTEM_PROMPT = (
 _TOPIC_TAGS_SCHEMA = {
     "type": "object",
     "properties": {
-        "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+        # No "maxItems" — same unsupported-keyword issue as the schemas
+        # above. The system prompt already asks for 3 to 8 tags;
+        # _suggest_topics below truncates to 8 in code as a safety net.
+        "topics": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["topics"],
     "additionalProperties": False,
 }
 
 
-def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
+def _suggest_topics(hypotheses: list[str], analysis: dict, api_key: str) -> list[str]:
     """Suggest short topic/keyword tags. This is the one small, separate
     AI call the digest adds — nothing in the Step 2 output already
     produces tags. Fed the CONDENSED analysis (pains/gains + Slack
@@ -495,6 +600,7 @@ def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
         ]
         summary_bits.append(analysis.get("slack_writeup", {}).get("what_we_learned", ""))
         summary_text = "\n".join(b for b in summary_bits if b)
+        hypotheses_line = "; ".join(hypotheses)
 
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
@@ -502,13 +608,16 @@ def _suggest_topics(hypothesis: str, analysis: dict, api_key: str) -> list[str]:
             max_tokens=256,
             system=_TOPIC_TAGS_SYSTEM_PROMPT,
             messages=[
-                {"role": "user", "content": f"Hypothesis: {hypothesis}\n\nSummary:\n{summary_text}"}
+                {"role": "user", "content": f"Hypotheses: {hypotheses_line}\n\nSummary:\n{summary_text}"}
             ],
             output_config={"format": {"type": "json_schema", "schema": _TOPIC_TAGS_SCHEMA}},
         )
         text = next(b.text for b in response.content if b.type == "text")
         data = json.loads(text)
-        return [t.strip() for t in data.get("topics", []) if isinstance(t, str) and t.strip()]
+        topics = [t.strip() for t in data.get("topics", []) if isinstance(t, str) and t.strip()]
+        # Enforce the cap of 8 in code — the schema itself can't (see
+        # _TOPIC_TAGS_SCHEMA above). Truncate only; never pad.
+        return topics[:8]
     except Exception:
         return []
 
@@ -548,11 +657,12 @@ def _extract_verified_quotes(evidence: str, raw_notes: str) -> list[str]:
 
 
 def build_digest(
-    hypothesis: str,
+    hypotheses: list[str],
     analysis: dict,
     raw_notes: str,
     api_key: str = "",
     person: dict | None = None,
+    additional_notes: str = "",
 ) -> dict:
     """Build the rich, quote-anchored digest for one processed run.
     Derived mostly from the already-computed Step 2 `analysis` — no full
@@ -563,24 +673,54 @@ def build_digest(
     topics list when there's no key or that call fails — never crashing
     and never leaving other fields incomplete because of it.
 
+    `hypotheses`: every hypothesis tested this run (one or more), in the
+    SAME order they were sent to run_step1/run_step2. Paired POSITIONALLY
+    with analysis["hypothesis_ledger"] (the model is asked for "one row
+    per hypothesis tested," in the same order) — each digest entry then
+    carries the exact tested string in its "hypothesis" field (not just
+    the model's own "claim" restatement), which is what later cross-run
+    matching (Hypothesis Findings, Compare) keys off. If the model produced
+    fewer ledger rows than hypotheses tested, the missing ones are marked
+    Untested with no quotes rather than guessing which is missing — same
+    anti-fabrication rule as everywhere else in this digest.
+
     `person` (optional): the interviewee's metadata, if already known.
     Often not yet known when a run is first saved (metadata confirmation
     happens right after) — pass None then, and call this again once
     confirmed to refresh the digest's interviewee field.
+
+    `additional_notes` (optional): the same interviewer-supplied context
+    passed to run_step1 (see there). Included alongside raw_notes as
+    source text for the verbatim-quote check below — a quote the model
+    pulls from these notes (not just the transcript) is real, interviewer-
+    written text, not a fabrication, so it still counts as verified.
     """
-    hypotheses_digest = [
-        {
-            "claim": row.get("claim", ""),
-            "status": row.get("status", "Untested"),
-            "quotes": _extract_verified_quotes(row.get("evidence", ""), raw_notes),
-        }
-        for row in analysis.get("hypothesis_ledger", [])
-    ]
+    verification_text = raw_notes
+    if additional_notes and additional_notes.strip():
+        verification_text = f"{raw_notes}\n\n{additional_notes.strip()}"
+
+    ledger = analysis.get("hypothesis_ledger", [])
+    hypotheses_digest = []
+    for i, hypothesis_text in enumerate(hypotheses):
+        if i < len(ledger):
+            row = ledger[i]
+            hypotheses_digest.append({
+                "hypothesis": hypothesis_text,
+                "claim": row.get("claim", ""),
+                "status": row.get("status", "Untested"),
+                "quotes": _extract_verified_quotes(row.get("evidence", ""), verification_text),
+            })
+        else:
+            # The model produced fewer ledger rows than hypotheses tested —
+            # don't guess which one is missing.
+            hypotheses_digest.append({
+                "hypothesis": hypothesis_text, "claim": "", "status": "Untested", "quotes": [],
+            })
 
     pains, gains = [], []
     for row in analysis.get("pains_and_gains", []):
         quote = row.get("verbatim_quote", "")
-        if not _quote_appears_in_notes(quote, raw_notes):
+        if not _quote_appears_in_notes(quote, verification_text):
             continue  # unverified — dropped, not propagated
         entry = {
             "what": row.get("what_it_is", ""),
@@ -599,11 +739,352 @@ def build_digest(
 
     return {
         "digest_version": DIGEST_VERSION,
-        "hypothesis": hypothesis,
+        "hypotheses_tested": list(hypotheses),
         "interviewee": interviewee,
         "hypotheses": hypotheses_digest,
         "pains": pains,
         "gains": gains,
-        "topics": _suggest_topics(hypothesis, analysis, api_key),
+        "topics": _suggest_topics(hypotheses, analysis, api_key),
         "claims_to_verify": list(analysis.get("claims_to_verify", [])),
     }
+
+
+# ---------------------------------------------------------------------------
+# Chat — talks about the WHOLE corpus, not one interview. A different kind
+# of feature from everything above: Hypothesis Findings and Search & Compare
+# deliberately do zero AI synthesis (pure retrieval), but a chat is
+# inherently synthesis. The anti-fabrication rule still applies, just
+# enforced through the system prompt's instructions (cite the interview a
+# claim comes from; say so when something isn't in the material) rather
+# than a verbatim-quote check on free-form conversational text, since
+# there's no fixed "evidence" field here to check the way there is for a
+# hypothesis ledger row.
+# ---------------------------------------------------------------------------
+
+CHAT_SYSTEM_INSTRUCTIONS = (
+    "You are a research assistant helping a Hacking for Defense (H4D) "
+    "student team review everything they've learned across their DoD "
+    "customer-discovery interviews. Below this message is the team's "
+    "complete hypothesis tree, their interviewee roster, their reference "
+    "document list, and — for every interview logged so far — its raw "
+    "transcript, any additional interviewer notes, and the full analysis "
+    "produced for every run against it (Mom Test audit, pains and gains, "
+    "hypothesis ledger, sharper questions, and Slack write-up).\n\n"
+    "Answer ONLY from this material. When you state a finding, name which "
+    "interview it comes from (its title and/or date) so the team can "
+    "trace it back. If something the team asks about isn't covered by "
+    "this material, say so plainly instead of guessing — never invent a "
+    "quote, a number, or a finding that isn't actually below. You may "
+    "synthesize across multiple interviews (spot a pattern, count how "
+    "many validated a hypothesis, compare two interviewees) as long as "
+    "every individual claim inside that synthesis still traces back to a "
+    "specific interview."
+)
+
+
+def _flatten_hypotheses_for_context(nodes: list[dict], depth: int = 0) -> list[tuple[dict, int]]:
+    """Same depth-first flatten as render._flatten_hypothesis_tree, kept
+    as its own copy here rather than importing that (leading-underscore,
+    render-specific) helper — this one is a plain data transform with no
+    Streamlit involved, appropriate to live with the rest of ai.py's
+    context-building code."""
+    flat = []
+    for node in nodes:
+        flat.append((node, depth))
+        flat.extend(_flatten_hypotheses_for_context(node.get("children", []), depth + 1))
+    return flat
+
+
+def build_corpus_context(
+    hypotheses_tree: list[dict],
+    interviews: list[dict],
+    people: list[dict],
+    documents: list[dict],
+) -> str:
+    """Build one large text blob covering everything else in the app
+    knows, for the Chat page to send as a (cached) system block on every
+    turn: the hypothesis tree, the people roster, the reference document
+    list, and every interview's raw transcript + Additional Notes + full
+    analysis for each of its runs — reusing render.build_markdown_report
+    so the exact same Mom Test audit / pains-and-gains / hypothesis
+    ledger / sharper questions / Slack write-up formatting the rest of
+    the app already shows appears here too.
+
+    `interviews`: each dict from storage.get_interviews(), augmented by
+    the caller with "person" (storage.get_person_for_interview) and
+    "runs" (storage.get_runs_for_interview) — this function only reads
+    and formats them, never touches storage itself.
+
+    Never raises; a missing/blank field renders as "(none)" / "Not
+    recorded" rather than crashing chat setup.
+    """
+    lines = ["=== HYPOTHESIS TREE ==="]
+    flat_hyps = _flatten_hypotheses_for_context(hypotheses_tree)
+    if not flat_hyps:
+        lines.append("(no hypotheses logged yet)")
+    for node, depth in flat_hyps:
+        indent = "  " * depth
+        state_tag = "dormant" if node.get("state") == "dormant" else "active"
+        lines.append(f"{indent}{node.get('label', '?')} [{state_tag}]: {node.get('text', '')}")
+    lines.append("")
+
+    lines.append("=== PEOPLE ROSTER ===")
+    if not people:
+        lines.append("(no interviewee metadata recorded yet)")
+    for p in people:
+        bits = [p.get("name") or "(unnamed)"]
+        role_org = ", ".join(x for x in [p.get("role"), p.get("organization")] if x)
+        if role_org:
+            bits.append(f"({role_org})")
+        rank_branch = ", ".join(x for x in [p.get("rank"), p.get("branch_service")] if x)
+        if rank_branch:
+            bits.append(f"[{rank_branch}]")
+        if p.get("relationship"):
+            bits.append(f"relationship: {p['relationship']}")
+        if p.get("interview_status"):
+            bits.append(f"status: {p['interview_status']}")
+        if p.get("interview_date"):
+            bits.append(f"date: {p['interview_date']}")
+        if p.get("descriptor"):
+            bits.append(f"— {p['descriptor']}")
+        lines.append("- " + " ".join(bits))
+    lines.append("")
+
+    lines.append("=== REFERENCE DOCUMENTS ON FILE ===")
+    if not documents:
+        lines.append("(none uploaded yet)")
+    for d in documents:
+        pin = "📌 " if d.get("is_pinned") else ""
+        lines.append(f"- {pin}{d.get('title', '(untitled)')}")
+    lines.append("")
+
+    lines.append("=== INTERVIEWS ===")
+    if not interviews:
+        lines.append("(no interviews logged yet)")
+    for interview in interviews:
+        lines.append("")
+        title = interview.get("title", "(untitled)")
+        when = interview.get("created_at", "")
+        lines.append(f'--- Interview: "{title}" (saved {when}) ---')
+
+        person = interview.get("person")
+        if person:
+            label = (person.get("name") or "").strip() or "(unnamed)"
+            sub = ", ".join(x for x in [person.get("role"), person.get("organization")] if x)
+            lines.append(f"Interviewee: {label}" + (f" ({sub})" if sub else ""))
+        else:
+            lines.append("Interviewee: Not recorded.")
+
+        additional_notes = (interview.get("notes") or "").strip()
+        lines.append(
+            "Additional notes (nonverbal/context observed by the interviewer, "
+            "NOT part of the transcript):"
+        )
+        lines.append(additional_notes if additional_notes else "(none)")
+
+        lines.append("Raw transcript:")
+        lines.append(interview.get("raw_text") or "(empty)")
+
+        runs = interview.get("runs") or []
+        if not runs:
+            lines.append("(no runs processed for this interview yet)")
+        for i, run in enumerate(runs, start=1):
+            hyps_display = "; ".join(run.get("hypotheses") or [run.get("hypothesis_text", "")])
+            run_when = run.get("created_at", "")
+            lines.append("")
+            lines.append(f"[Run {i} — {run_when} — hypotheses tested: {hyps_display}]")
+            lines.append(render.build_markdown_report(run.get("output") or {}, hyps_display))
+
+    return "\n".join(lines)
+
+
+def run_chat(
+    history: list[dict], user_message: str, api_key: str, corpus_context: str
+) -> dict:
+    """One chat turn. `history` is every prior turn this session (a list
+    of {"role", "content"} dicts, user/assistant alternating — exactly
+    the shape the Anthropic API expects, since the caller stores and
+    replays this list as-is). `corpus_context` (see build_corpus_context)
+    is sent as a cached system block, so later turns in the same session
+    don't re-pay its full cost — only its first use, and any explicit
+    refresh, cost full price.
+
+    Returns {"reply": str, "history": [...]} — `history` already
+    includes this turn (both the user message and the reply), ready to
+    pass back in as-is on the next call.
+    """
+    client = _client(api_key)
+    system = [{
+        "type": "text",
+        "text": f"{CHAT_SYSTEM_INSTRUCTIONS}\n\n{corpus_context}",
+        "cache_control": {"type": "ephemeral"},
+    }]
+    messages = history + [{"role": "user", "content": user_message}]
+    response = _call(client, messages=messages, system=system, max_tokens=4096)
+    reply = _extract_text(response)
+    return {"reply": reply, "history": messages + [{"role": "assistant", "content": reply}]}
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis suggestions — per feedback, hypotheses are never auto-added.
+# This proposes candidates for the team to review; nothing reaches
+# storage.add_hypothesis unless a person explicitly approves it on the
+# Hypotheses page. Based on the same full-corpus context Chat uses (every
+# interview's transcript + full analysis + the existing tree), so a
+# suggestion is grounded in what the team has actually found, not guessed.
+# ---------------------------------------------------------------------------
+
+_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT = (
+    "You help a Hacking for Defense (H4D) student team refine their DoD "
+    "customer-discovery hypothesis tree, based on everything they've "
+    "learned so far. Below is their full existing hypothesis tree and "
+    "every interview logged so far (transcripts, additional notes, and "
+    "the complete analysis for every run). Propose new candidate "
+    "hypotheses worth testing next — a new root-level hypothesis, a "
+    "refinement, or a natural child of an existing one (e.g. probing "
+    "WHY a validated hypothesis held, or an alternative explanation for "
+    "an invalidated one) — each one surfacing a real gap, pattern, or "
+    "open question in what the interviews actually show.\n\n"
+    "Ground every suggestion in something specific the interviews "
+    "actually said; name which interview(s) support it in the "
+    "rationale. Never invent a finding that isn't in the material "
+    "below — if there isn't enough material yet to responsibly suggest "
+    "anything (e.g. no interviews logged yet), return an empty list "
+    "rather than guessing. Suggest at most 8. For each one, if it "
+    "naturally belongs as a child of an existing hypothesis, give that "
+    "hypothesis's exact label (e.g. \"1\" or \"2a\") in "
+    "suggested_parent_label; leave it blank for a new root-level "
+    "hypothesis."
+)
+
+_HYPOTHESIS_SUGGESTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "suggested_parent_label": {"type": "string"},
+                },
+                "required": ["text", "rationale", "suggested_parent_label"],
+                "additionalProperties": False,
+            },
+            # No "maxItems" — unsupported by Claude's structured-output
+            # schema (see CLARIFYING_QUESTIONS_SCHEMA's comment above for
+            # the exact 400 this triggers); capped to 8 in code below
+            # instead.
+        }
+    },
+    "required": ["suggestions"],
+    "additionalProperties": False,
+}
+
+
+def suggest_hypotheses(corpus_context: str, api_key: str) -> list[dict]:
+    """Ask the AI to propose new candidate hypotheses, grounded in
+    everything logged in the corpus so far (see build_corpus_context).
+    NEVER inserts anything into the tree — returns suggestions only, as
+    [{"text", "rationale", "suggested_parent_label"}, ...] (at most 8,
+    truncated in code, not via the schema); the Hypotheses page shows
+    them for review and adds only the ones a person explicitly checks
+    and approves, via the normal storage.add_hypothesis.
+
+    Unlike suggest_metadata/_suggest_topics (silent, best-effort
+    conveniences that fall back to empty on any failure), this raises
+    AIError on failure — it's a primary action the user explicitly
+    triggered by clicking a button, so a failure should be visible, not
+    swallowed into a quietly-empty suggestion list.
+    """
+    client = _client(api_key)
+    system = f"{_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT}\n\n{corpus_context}"
+    response = _call(
+        client,
+        messages=[{
+            "role": "user",
+            "content": "Suggest new hypotheses to test next, based on everything above.",
+        }],
+        system=system,
+        schema=_HYPOTHESIS_SUGGESTIONS_SCHEMA,
+    )
+    data = _extract_json(response)
+    return list(data.get("suggestions", []))[:8]
+
+
+# ---------------------------------------------------------------------------
+# Background & Definitions — a specialized mode of Chat: explain words,
+# acronyms, or concepts, rather than answer from the corpus. Unlike Chat's
+# main mode (and every AI feature above it), this is explicitly ALLOWED to
+# draw on general domain knowledge, not just what's in the interviews —
+# a definition of "OCA" is a fact, not something that needs a specific
+# interview to back it up. When a term DOES appear in the corpus, the
+# system prompt asks the model to say how it was used there too.
+# ---------------------------------------------------------------------------
+
+_DEFINE_TERMS_SYSTEM_PROMPT = (
+    "You are a specialized assistant that ONLY explains what words, "
+    "acronyms, or concepts mean, for a Hacking for Defense (H4D) "
+    "student team's DoD customer-discovery work. Below is the team's "
+    "corpus (hypotheses, people, documents, interviews) for context.\n\n"
+    "Given the team's question, identify every distinct term, acronym, "
+    "or concept they're asking about and define each one clearly and "
+    "concisely. Unlike other assistants in this app, you MAY use "
+    "general domain/military/DoD knowledge for standard definitions — "
+    "you are not limited to only what's in the corpus above. If a term "
+    "also appears in the corpus, briefly note how it was used there. "
+    "If a term is a real acronym, give its spelled-out expansion; if "
+    "it is not an acronym, leave the expansion blank. If you don't "
+    "actually know what a term means or aren't confident of an "
+    "acronym's expansion, say so plainly in the definition rather than "
+    "guessing — never invent an expansion for a real acronym."
+)
+
+_DEFINE_TERMS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "terms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "term": {"type": "string"},
+                    "definition": {"type": "string"},
+                    "is_acronym": {"type": "boolean"},
+                    "expansion": {"type": "string"},
+                },
+                "required": ["term", "definition", "is_acronym", "expansion"],
+                "additionalProperties": False,
+            },
+            # No "maxItems" — unsupported by Claude's structured-output
+            # schema (see CLARIFYING_QUESTIONS_SCHEMA's comment above);
+            # a question naming several terms just returns several rows.
+        }
+    },
+    "required": ["terms"],
+    "additionalProperties": False,
+}
+
+
+def define_terms(query: str, corpus_context: str, api_key: str) -> list[dict]:
+    """Ask the AI to define the term(s)/acronym(s)/concept(s) in `query`.
+    Returns [{"term", "definition", "is_acronym", "expansion"}, ...] — one
+    entry per distinct term identified, never inserted into the
+    dictionary automatically (see storage.add_dictionary_entry, called
+    only when a person clicks "Add to dictionary" on the Chat page).
+
+    Raises AIError on failure — like suggest_hypotheses, this is a
+    primary action the user explicitly triggered, so a failure should be
+    visible rather than silently swallowed.
+    """
+    client = _client(api_key)
+    system = f"{_DEFINE_TERMS_SYSTEM_PROMPT}\n\n{corpus_context}"
+    response = _call(
+        client,
+        messages=[{"role": "user", "content": query}],
+        system=system,
+        schema=_DEFINE_TERMS_SCHEMA,
+    )
+    data = _extract_json(response)
+    return list(data.get("terms", []))

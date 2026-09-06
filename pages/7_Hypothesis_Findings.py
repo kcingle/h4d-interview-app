@@ -1,12 +1,16 @@
 """
-pages/7_Hypothesis_Status.py — Roll a single hypothesis up across every
+pages/7_Hypothesis_Findings.py — Roll a single hypothesis up across every
 interview that tested it, using the enriched digests (never full
-transcripts). Pure retrieval and organization of what interviews already
-said — quote-anchored, never a synthesized "what this all means"
-narrative. Any aggregate shown here (counts, lists) is mechanical.
+transcripts). Renamed from "Hypothesis Status" for clarity, since it sat
+right next to "Hypotheses" (the tree management page) in the sidebar
+with an easily-confused name — this page is specifically the evidence
+FOUND for a hypothesis, not where you manage the tree itself. Pure
+retrieval and organization of what interviews already said —
+quote-anchored, never a synthesized "what this all means" narrative.
+Any aggregate shown here (counts, lists) is mechanical.
 
 Matching a run to a tree hypothesis is exact-text (case/whitespace
-normalized) against run.hypothesis_text — see
+normalized) against a run's tested hypotheses — see
 storage._normalize_hypothesis_text for why this isn't fuzzy.
 """
 
@@ -14,9 +18,9 @@ import streamlit as st
 
 import storage
 
-st.set_page_config(page_title="H4D Interview App — Hypothesis Status", page_icon="📊")
+st.set_page_config(page_title="H4D Interview App — Hypothesis Findings", page_icon="📊")
 
-st.title("Hypothesis Status")
+st.title("Hypothesis Findings")
 st.caption(
     "Select a hypothesis to see every interview that tested it — verdicts "
     "and their verbatim evidence, organized from the interviews' own "
@@ -146,8 +150,8 @@ for depth, node in family:
 st.divider()
 st.caption(
     "Matching note: an interview counts toward a hypothesis only if it was "
-    "processed against that hypothesis's EXACT text. Hypothesis selection "
-    "isn't wired into the Process Interview flow yet, so an interview run "
-    "against a different hypothesis (e.g. the current hardcoded default) "
-    "won't appear here even if it's topically related."
+    "run against that hypothesis's EXACT text — checked on the Process "
+    "Interview or Interviews page's hypothesis picker. A run tested against "
+    "several hypotheses at once still counts toward each one individually; "
+    "a differently-worded (even if topically related) hypothesis won't."
 )

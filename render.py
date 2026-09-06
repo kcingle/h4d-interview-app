@@ -1,26 +1,57 @@
 """
 render.py — Shared Streamlit rendering for one processed interview's
-output. Used by both app.py (a freshly-computed result) and
-pages/1_Interviews.py (a past run's saved output), so both places render
-tables identically. Not AI logic (ai.py owns the API calls, including
-building the per-run digest — see ai.build_digest) and not persistence
+output. Used by both pages/1_Interviews.py and pages/6_Metadata.py (each
+showing a past run's saved output), so both places render tables
+identically. Not AI logic (ai.py owns the API calls, including building
+the per-run digest — see ai.build_digest) and not persistence
 (storage.py owns the database) — purely presentation.
 
-pages/1_Interviews.py can't simply `import app` for this, since app.py's
-top-level code is the actual Streamlit page — importing it would re-run
-that page's UI as a side effect.
+(Process_Interview.py, the entry point, hands off to the Interviews page
+immediately after saving a run rather than rendering results itself —
+see that file's docstring — so it no longer uses this module for that.)
 """
 
 import streamlit as st
 
-# The one hardcoded sample hypothesis for Step 2/3. Hypothesis
-# management/selection comes in Step 4; both the Process Interview page
-# and the Interviews page's rerun control use this as their default.
-DEFAULT_HYPOTHESIS = (
-    "Junior intelligence analysts spend more than 2 hours per day manually "
-    "reformatting data between disconnected tools, and would adopt a "
-    "solution that automates cross-tool data transfer."
-)
+
+def _flatten_hypothesis_tree(nodes: list[dict], depth: int = 0) -> list[tuple[dict, int]]:
+    """Flatten a hypothesis tree (as returned by storage.get_hypothesis_tree)
+    into a depth-first list of (node, depth) pairs, preserving the tree's
+    own sort order. Depth is used purely for display indentation."""
+    flat = []
+    for node in nodes:
+        flat.append((node, depth))
+        flat.extend(_flatten_hypothesis_tree(node["children"], depth + 1))
+    return flat
+
+
+def render_hypothesis_picker(tree: list[dict], key_prefix: str) -> list[str]:
+    """Render one checkbox per hypothesis in the tree, indented by depth,
+    active nodes pre-checked and dormant nodes available but unchecked —
+    and return the statement text of every checked node, in tree order.
+
+    Shared by the Process Interview page and the Interviews page's rerun
+    control so selecting one or more hypotheses to test looks and behaves
+    identically everywhere. `key_prefix` must be unique per call site
+    (e.g. per-interview on the rerun control) so widget keys don't clash.
+    """
+    flat = _flatten_hypothesis_tree(tree)
+    if not flat:
+        st.caption("No hypotheses yet — add some on the Hypotheses page.")
+        return []
+    selected = []
+    for node, depth in flat:
+        indent = " " * 4 * depth
+        suffix = "  _(dormant)_" if node["state"] == "dormant" else ""
+        label = f"{indent}{node['text']}{suffix}"
+        checked = st.checkbox(
+            label,
+            value=(node["state"] == "active"),
+            key=f"{key_prefix}_{node['id']}",
+        )
+        if checked:
+            selected.append(node["text"])
+    return selected
 
 
 def _md_cell(text: str) -> str:
@@ -249,7 +280,7 @@ def render_analysis(
     markdown_report = build_markdown_report(result, hypothesis, header=export_header)
     # No st.expander here (unlike a plain page): render_analysis is often
     # called from inside an outer expander (one per past run, on the
-    # Interviews and People pages), and Streamlit does not allow nested
+    # Interviews and Metadata pages), and Streamlit does not allow nested
     # expanders — this bit both of those pages from Step 3 onward,
     # whenever a run was actually expanded, until this fix.
     st.caption("📋 Copy report — hover the block below and click the copy icon in its corner.")
