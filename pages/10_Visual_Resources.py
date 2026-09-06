@@ -22,7 +22,17 @@ st.caption(
     "or just scroll through everything."
 )
 
-resources = storage.get_visual_resources()
+try:
+    resources = storage.get_visual_resources()
+except Exception:
+    st.error(
+        "Couldn't load Visual Resources right now — this is usually a "
+        "momentary database hiccup (the database can take a few seconds "
+        "to wake up after sitting idle), not lost data."
+    )
+    if st.button("Try again"):
+        st.rerun()
+    st.stop()
 
 if not resources:
     st.write(
