@@ -48,22 +48,28 @@ def _postgres_connection():
 
 # Tables in FK-safe insert order: a row's parent (person, interview,
 # hypothesis parent) is always inserted before anything that references it.
-TABLES_IN_ORDER = ["people", "interviews", "hypotheses", "documents", "runs"]
+# dictionary_entries has no foreign keys, so its position doesn't matter.
+TABLES_IN_ORDER = ["people", "interviews", "hypotheses", "documents", "runs", "dictionary_entries"]
 
 # Explicit column lists per table (never SELECT/INSERT *), matching the
-# CURRENT schema in storage.py exactly.
+# CURRENT schema in storage.py exactly (kept in sync as of the
+# interviewers/multi-hypothesis/Dictionary work — see storage.py's own
+# CREATE TABLE statements for the source of truth).
 TABLE_COLUMNS = {
     "people": [
         "id", "name", "role", "organization", "seniority_level", "relationship",
         "interview_date", "descriptor", "rank", "branch_service",
-        "interview_status", "created_at",
+        "interview_status", "interviewers_json", "created_at",
     ],
     "interviews": ["id", "title", "raw_text", "notes", "person_id", "created_at"],
     "hypotheses": ["id", "statement", "label", "state", "parent_id", "created_at"],
     "documents": ["id", "title", "content", "content_format", "is_pinned", "created_at"],
     "runs": [
-        "id", "interview_id", "hypothesis_text", "questions_json", "answers_json",
-        "output_json", "digest_json", "document_ids_json", "created_at",
+        "id", "interview_id", "hypothesis_text", "hypotheses_json", "questions_json",
+        "answers_json", "output_json", "digest_json", "document_ids_json", "created_at",
+    ],
+    "dictionary_entries": [
+        "id", "term", "definition", "is_acronym", "expansion", "is_important", "created_at",
     ],
 }
 
