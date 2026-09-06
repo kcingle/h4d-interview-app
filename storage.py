@@ -82,8 +82,28 @@ def get_connection():
     """Borrow a pooled connection. Callers MUST release it via
     release_connection() in a `finally` block (mirroring the old
     get_connection()/conn.close() shape, just backed by a pool instead of
-    a fresh file handle)."""
-    return _get_pool().getconn()
+    a fresh file handle).
+
+    Before handing it back, this proves the connection is actually alive
+    with a throwaway SELECT 1. Neon suspends its compute after a few
+    minutes idle; a pooled connection that's been sitting since before a
+    suspend still looks fine to psycopg2 (open, idle) until the first
+    real query hits it, which is what was surfacing as a raw
+    psycopg2.OperationalError deep inside get_people()/etc. instead of
+    here. A connection that fails the check is discarded (closed, not
+    returned to the pool) and swapped for a fresh one."""
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        conn.cursor().execute("SELECT 1")
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        try:
+            pool.putconn(conn, close=True)
+        except Exception:
+            pass
+        conn = pool.getconn()
+        conn.cursor().execute("SELECT 1")
+    return conn
 
 
 def release_connection(conn) -> None:
