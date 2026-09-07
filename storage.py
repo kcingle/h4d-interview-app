@@ -604,6 +604,27 @@ def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
     return {"counts": counts, "quote_backed": quote_backed, "unsupported": unsupported}
 
 
+def get_runs_testing_hypothesis(hypothesis_statement: str) -> list[dict]:
+    """Every run (across every interview) that tested this exact
+    hypothesis text — same matching rule as get_hypothesis_status_rollup
+    (exact, normalized — see _normalize_hypothesis_text). Each returned
+    run dict has interview_id/interview_title attached alongside its own
+    fields (including "output", where sharper_questions lives). Used by
+    Weekly Brief to let you pick which interview(s)' analyses to pull
+    test questions from for a given hypothesis."""
+    target = _normalize_hypothesis_text(hypothesis_statement)
+    matches = []
+    for interview in get_interviews():
+        for run in get_runs_for_interview(interview["id"]):
+            if target in {_normalize_hypothesis_text(h) for h in run["hypotheses"]}:
+                matches.append({
+                    **run,
+                    "interview_id": interview["id"],
+                    "interview_title": interview["title"],
+                })
+    return matches
+
+
 def get_all_topic_tags() -> list[str]:
     """Every distinct topic tag across all digests (only digest_version 2+
     digests carry topics), sorted, for a search page's quick-pick list."""
