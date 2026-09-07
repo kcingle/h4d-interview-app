@@ -127,6 +127,81 @@ media_caption = st.text_input(
 if "flow_stage" not in st.session_state:
     st.session_state.flow_stage = "idle"
 
+
+def _finish_analysis_and_save():
+    """Step 2 onward: run the full analysis under the graded, unmodified
+    SYSTEM_PROMPT, save the interview + run + any media, and hand off to
+    Interviews. Shared by both paths that can reach "no more clarifying
+    questions" — the model needing nothing at all on round 1, and the
+    adaptive loop below finishing naturally."""
+    docs_for_step2 = st.session_state.get("selected_documents", [])
+    with st.spinner("Running the full analysis..."):
+        analysis = ai.run_step2_after_adaptive_clarifying(
+            st.session_state.adaptive_history, api_key, documents=docs_for_step2,
+        )
+    # Step 3: persist immediately. This always creates a NEW interview +
+    # its first run — rerunning an existing saved interview against a
+    # different hypothesis happens on the Interviews page instead, and
+    # never overwrites this one. `person=None` here — interviewee
+    # metadata isn't confirmed yet; that suggest-and-confirm form now
+    # lives on the Interviews page (see just_processed_interview_id
+    # below), so the handoff to it never has to wait on filling out a form.
+    digest = ai.build_digest(
+        selected_hypotheses, analysis, raw_notes, api_key,
+        person=None, additional_notes=additional_notes,
+    )
+    title = interview_title.strip() or default_title
+    interview_id = storage.save_interview(title, raw_notes, notes=additional_notes)
+    document_ids = [d["id"] for d in docs_for_step2]
+    answered = st.session_state.get("adaptive_answered", [])
+    storage.save_run(
+        interview_id,
+        selected_hypotheses,
+        [q for q, _ in answered],
+        [a for _, a in answered],
+        analysis,
+        digest,
+        document_ids=document_ids,
+    )
+
+    # Save any uploaded media against this interview. A file over the
+    # size cap doesn't block the interview itself from saving — that
+    # analysis work is done and shouldn't be lost over one oversized
+    # upload — it's just skipped, with the reason handed to the
+    # Interviews page below to show once we land there.
+    media_errors = []
+    for filename, content, mime_type in st.session_state.get("pending_media", []):
+        try:
+            storage.add_visual_resource(
+                interview_id, filename, content, mime_type,
+                caption=st.session_state.get("pending_media_caption", ""),
+            )
+        except storage.VisualResourceError as e:
+            media_errors.append(str(e))
+    if media_errors:
+        st.session_state["media_upload_errors"] = media_errors
+
+    # Hand off IMMEDIATELY to the Interviews page for this one interview —
+    # that's where the full synthesis (Mom Test audit, pains/gains,
+    # hypothesis ledger, sharper questions, Slack write-up, digest) lives,
+    # and where interviewee metadata now gets suggested/confirmed too.
+    # Pre-select it (by id, not by assuming index 0, in case ordering ever
+    # changes) and flag it so that page both auto-expands its one run and
+    # offers the metadata form for it.
+    interviews_after_save = storage.get_interviews()
+    target_idx = next(
+        (i for i, iv in enumerate(interviews_after_save) if iv["id"] == interview_id), 0,
+    )
+    st.session_state["interviews_selectbox"] = target_idx
+    st.session_state["just_processed_interview_id"] = interview_id
+    for key in (
+        "pending_media", "pending_media_caption", "flow_stage", "adaptive_history",
+        "adaptive_current_question", "adaptive_round", "adaptive_answered",
+    ):
+        st.session_state.pop(key, None)
+    st.switch_page("pages/1_Interviews.py")
+
+
 start_clicked = st.button(
     "Start", type="primary", disabled=not raw_notes.strip() or not selected_hypotheses
 )
@@ -146,110 +221,69 @@ if start_clicked:
         for f in (uploaded_media or [])
     ]
     st.session_state.pending_media_caption = media_caption.strip()
+    st.session_state.adaptive_answered = []
     try:
-        with st.spinner("Asking clarifying questions..."):
-            step1 = ai.run_step1(
+        with st.spinner("Asking a clarifying question..."):
+            step1 = ai.start_adaptive_clarifying(
                 selected_hypotheses,
                 raw_notes,
                 api_key,
                 documents=selected_documents,
                 additional_notes=additional_notes,
             )
-        st.session_state.step1_questions = step1["questions"]
-        st.session_state.step1_history = step1["history"]
-        st.session_state.flow_stage = "awaiting_answers"
+        st.session_state.adaptive_history = step1["history"]
+        if step1["question"]:
+            st.session_state.adaptive_current_question = step1["question"]
+            st.session_state.adaptive_round = step1["round"]
+            st.session_state.flow_stage = "clarifying"
+        else:
+            # The model decided it needs nothing at all for this
+            # interview — go straight to the full analysis rather than
+            # showing an empty clarifying step with nothing to answer.
+            _finish_analysis_and_save()
     except ai.AIError as e:
         st.error(str(e))
 
-if st.session_state.flow_stage == "awaiting_answers":
+if st.session_state.flow_stage == "clarifying":
     st.divider()
-    st.subheader("Clarifying questions")
-    questions = st.session_state.get("step1_questions", [])
+    st.subheader("Clarifying question")
+    st.caption(
+        f"Question {st.session_state.adaptive_round} of up to "
+        f"{ai.MAX_ADAPTIVE_QUESTIONS} — each one is chosen after seeing your "
+        "last answer (Flipped Interaction: the model interrogates you "
+        "before analyzing anything, rather than the other way around)."
+    )
 
-    if not questions:
-        st.write("The AI had no clarifying questions for this interview.")
+    if st.session_state.get("adaptive_answered"):
+        with st.expander("Answered so far"):
+            for q, a in st.session_state.adaptive_answered:
+                st.markdown(f"**Q:** {q}")
+                st.markdown(f"**A:** {a or '_(no answer given)_'}")
+                st.markdown("---")
 
-    with st.form("answers_form"):
-        answers = [
-            st.text_area(f"Q{i + 1}. {q}", key=f"answer_{i}")
-            for i, q in enumerate(questions)
-        ]
-        submitted = st.form_submit_button("Continue → Run full analysis")
+    with st.form("adaptive_answer_form"):
+        answer = st.text_area(st.session_state.adaptive_current_question, key="adaptive_answer_box")
+        submitted = st.form_submit_button("Answer")
 
     if submitted:
         try:
-            docs_for_step2 = st.session_state.get("selected_documents", [])
-            with st.spinner("Running the full analysis..."):
-                analysis = ai.run_step2(
-                    st.session_state.step1_history,
-                    questions,
-                    answers,
+            question = st.session_state.adaptive_current_question
+            st.session_state.adaptive_answered.append((question, answer))
+            with st.spinner("Deciding whether it needs anything else..."):
+                nxt = ai.continue_adaptive_clarifying(
+                    st.session_state.adaptive_history,
+                    question,
+                    answer,
+                    st.session_state.adaptive_round,
                     api_key,
-                    documents=docs_for_step2,
+                    documents=st.session_state.get("selected_documents", []),
                 )
-            # Step 3: persist immediately. This always creates a NEW
-            # interview + its first run — rerunning an existing saved
-            # interview against a different hypothesis happens on the
-            # Interviews page instead, and never overwrites this one.
-            # `person=None` here — interviewee metadata isn't confirmed
-            # yet; that suggest-and-confirm form now lives on the
-            # Interviews page (see just_processed_interview_id below), so
-            # the handoff to it never has to wait on filling out a form.
-            digest = ai.build_digest(
-                selected_hypotheses,
-                analysis,
-                raw_notes,
-                api_key,
-                person=None,
-                additional_notes=additional_notes,
-            )
-            title = interview_title.strip() or default_title
-            interview_id = storage.save_interview(title, raw_notes, notes=additional_notes)
-            document_ids = [d["id"] for d in docs_for_step2]
-            storage.save_run(
-                interview_id,
-                selected_hypotheses,
-                questions,
-                answers,
-                analysis,
-                digest,
-                document_ids=document_ids,
-            )
-
-            # Save any uploaded media against this interview. A file over
-            # the size cap doesn't block the interview itself from saving —
-            # that analysis work is done and shouldn't be lost over one
-            # oversized upload — it's just skipped, with the reason handed
-            # to the Interviews page below to show once we land there.
-            media_errors = []
-            for filename, content, mime_type in st.session_state.get("pending_media", []):
-                try:
-                    storage.add_visual_resource(
-                        interview_id, filename, content, mime_type,
-                        caption=st.session_state.get("pending_media_caption", ""),
-                    )
-                except storage.VisualResourceError as e:
-                    media_errors.append(str(e))
-            st.session_state.pop("pending_media", None)
-            st.session_state.pop("pending_media_caption", None)
-            if media_errors:
-                st.session_state["media_upload_errors"] = media_errors
-
-            # Hand off IMMEDIATELY to the Interviews page for this one
-            # interview — that's where the full synthesis (Mom Test
-            # audit, pains/gains, hypothesis ledger, sharper questions,
-            # Slack write-up, digest) lives, and where interviewee
-            # metadata now gets suggested/confirmed too. Pre-select it
-            # (by id, not by assuming index 0, in case ordering ever
-            # changes) and flag it so that page both auto-expands its one
-            # run and offers the metadata form for it.
-            interviews_after_save = storage.get_interviews()
-            target_idx = next(
-                (i for i, iv in enumerate(interviews_after_save) if iv["id"] == interview_id),
-                0,
-            )
-            st.session_state["interviews_selectbox"] = target_idx
-            st.session_state["just_processed_interview_id"] = interview_id
-            st.switch_page("pages/1_Interviews.py")
+            st.session_state.adaptive_history = nxt["history"]
+            if nxt["question"]:
+                st.session_state.adaptive_current_question = nxt["question"]
+                st.session_state.adaptive_round = nxt["round"]
+                st.rerun()
+            else:
+                _finish_analysis_and_save()
         except ai.AIError as e:
             st.error(str(e))

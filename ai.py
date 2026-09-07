@@ -75,13 +75,19 @@ question anchors to specific past behavior — a question being forward-looking 
 itself a failure, since DoD requirements interviews legitimately probe future needs."""
 
 
-def _build_system(documents: list[dict] | None):
-    """Build the `system` request parameter. Returns the bare SYSTEM_PROMPT
-    string, unchanged, when no TEXT-format documents are selected (Step
-    2/3/4 behavior). When there ARE text-format documents (Step 5),
-    returns a list of two text blocks instead: the untouched system
-    prompt, plus a separate, clearly-labeled reference-material block —
-    the prompt string itself is never edited.
+def _build_system(documents: list[dict] | None, base_prompt: str = SYSTEM_PROMPT):
+    """Build the `system` request parameter. Returns `base_prompt`
+    unchanged when no TEXT-format documents are selected (Step 2/3/4
+    behavior). When there ARE text-format documents (Step 5), returns a
+    list of two text blocks instead: the untouched base prompt, plus a
+    separate, clearly-labeled reference-material block — the prompt
+    string itself is never edited.
+
+    `base_prompt` defaults to the graded SYSTEM_PROMPT (every existing
+    caller keeps doing exactly that); the adaptive clarifying functions
+    below pass _ADAPTIVE_CLARIFYING_SYSTEM_PROMPT instead, so reference
+    documents stay visible during that loop too without this function
+    needing to know anything about which prompt it's wrapping.
 
     PDF-format documents are NOT included here — Claude reads a PDF
     natively as a document content block, which the API only accepts in
@@ -94,7 +100,7 @@ def _build_system(documents: list[dict] | None):
     """
     text_documents = [d for d in (documents or []) if d.get("content_format", "text") == "text"]
     if not text_documents:
-        return SYSTEM_PROMPT
+        return base_prompt
     sections = "\n\n".join(f"### {d['title']}\n{d['content']}" for d in text_documents)
     reference_block = (
         "REFERENCE MATERIAL — background context provided by the team, not "
@@ -102,7 +108,7 @@ def _build_system(documents: list[dict] | None):
         "attribute it to the interviewee.\n\n" + sections
     )
     return [
-        {"type": "text", "text": SYSTEM_PROMPT},
+        {"type": "text", "text": base_prompt},
         {"type": "text", "text": reference_block},
     ]
 
@@ -468,6 +474,159 @@ def run_step2(
     # with invented questions if the model returns fewer than three.
     data["sharper_questions"] = list(data.get("sharper_questions", []))[:3]
 
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Adaptive clarifying — a genuinely turn-by-turn Flipped Interaction, used
+# by Process Interview's primary new-interview flow (not the Interviews
+# page's "Rerun this interview", which still uses run_step1/run_step2
+# above, unchanged). run_step1 above asks up to three questions in a
+# single batch, all answered at once — real Flipped Interaction is
+# adaptive: one question, your answer, then the NEXT question is informed
+# by that specific answer, not decided in advance.
+#
+# IMPORTANT: this uses its OWN system prompt below, entirely separate from
+# the graded SYSTEM_PROMPT — that constant is never read, referenced, or
+# modified by anything in this section. Once the loop ends,
+# run_step2_after_adaptive_clarifying calls Step 2 under the exact
+# original, unmodified SYSTEM_PROMPT and ANALYSIS_SCHEMA, same as always
+# — only how the preceding Q&A was gathered differs.
+# ---------------------------------------------------------------------------
+
+_ADAPTIVE_CLARIFYING_SYSTEM_PROMPT = """You are helping a Hacking for Defense student team prepare to
+analyze a DoD customer-discovery interview, before any analysis begins. You are given
+one or more hypotheses being tested and the raw notes from a single beneficiary
+interview.
+
+Ask ONE focused question at a time about what the notes do NOT capture, regarding
+(a) the interviewee's nonverbal communication relative to the hypotheses, (b)
+implied-but-not-stated actions on the team's or interviewee's part, and (c) implied
+implications when the interviewee's answers are viewed collectively.
+
+After each answer, decide whether it reveals a real gap worth probing further in the
+same vein: if so, ask exactly one more question that builds on that specific answer;
+if not — or once three questions have been asked in total — stop and signal you are
+ready by returning an empty question list instead.
+
+Output only the next question (or an empty list, if you are ready to proceed) —
+never produce any analysis here."""
+
+MAX_ADAPTIVE_QUESTIONS = 3
+
+
+def start_adaptive_clarifying(
+    hypotheses: list[str],
+    raw_notes: str,
+    api_key: str,
+    documents: list[dict] | None = None,
+    additional_notes: str = "",
+) -> dict:
+    """Round 1 of the adaptive clarifying loop: ask for the first
+    question (or none, if the model decides it needs nothing at all for
+    this interview). Same user-message shape as run_step1, just under
+    _ADAPTIVE_CLARIFYING_SYSTEM_PROMPT instead of SYSTEM_PROMPT.
+
+    Returns {"question": str | None, "round": 1, "history": [...]}.
+    """
+    client = _client(api_key)
+    hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
+    user_text = (
+        f"Hypotheses being tested:\n{hypotheses_block}\n\n"
+        f"Raw interview notes:\n{raw_notes}"
+    )
+    if additional_notes and additional_notes.strip():
+        user_text += (
+            "\n\nAdditional notes from the interviewer (not part of the "
+            "transcript — e.g. nonverbal communication, tone, body language, "
+            "the setting, or other context observed during the interview):\n"
+            f"{additional_notes.strip()}"
+        )
+    user_content = _build_user_message_content(user_text, documents)
+    response = _call(
+        client,
+        messages=[{"role": "user", "content": user_content}],
+        schema=CLARIFYING_QUESTIONS_SCHEMA,
+        system=_build_system(documents, base_prompt=_ADAPTIVE_CLARIFYING_SYSTEM_PROMPT),
+    )
+    data = _extract_json(response)
+    assistant_text = next(b.text for b in response.content if b.type == "text")
+    questions = list(data.get("questions", []))[:1]
+
+    return {
+        "question": questions[0] if questions else None,
+        "round": 1,
+        "history": [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_text},
+        ],
+    }
+
+
+def continue_adaptive_clarifying(
+    history: list[dict],
+    question: str,
+    answer: str,
+    round_num: int,
+    api_key: str,
+    documents: list[dict] | None = None,
+) -> dict:
+    """Answer the previous question, then ask whether the model wants
+    exactly one more (grounded in that specific answer) or is ready to
+    move on. `round_num` is how many questions have been asked so far
+    (including the one just answered) — capped at MAX_ADAPTIVE_QUESTIONS
+    here as a safety net even though the prompt already asks for that cap
+    itself, the same belt-and-suspenders pattern run_step1/run_step2 use
+    for their own "up to three" limits.
+
+    Returns {"question": str | None, "round": int, "history": [...]}.
+    """
+    if round_num >= MAX_ADAPTIVE_QUESTIONS:
+        return {"question": None, "round": round_num, "history": history}
+
+    client = _client(api_key)
+    followup_text = (
+        f"Q: {question}\nA: {answer.strip() or '(no answer given)'}\n\n"
+        "Do you need to ask exactly one more question in the same vein, "
+        "grounded in that answer? If not — or if three questions have now "
+        "been asked in total — return an empty question list instead."
+    )
+    messages = history + [{"role": "user", "content": followup_text}]
+    response = _call(
+        client, messages=messages, schema=CLARIFYING_QUESTIONS_SCHEMA,
+        system=_build_system(documents, base_prompt=_ADAPTIVE_CLARIFYING_SYSTEM_PROMPT),
+    )
+    data = _extract_json(response)
+    assistant_text = next(b.text for b in response.content if b.type == "text")
+    questions = list(data.get("questions", []))[:1]
+    new_history = messages + [{"role": "assistant", "content": assistant_text}]
+
+    return {
+        "question": questions[0] if questions else None,
+        "round": round_num + 1,
+        "history": new_history,
+    }
+
+
+def run_step2_after_adaptive_clarifying(
+    history: list[dict], api_key: str, documents: list[dict] | None = None
+) -> dict:
+    """Step 2, following the adaptive clarifying loop above — runs under
+    the EXACT ORIGINAL, unmodified SYSTEM_PROMPT and ANALYSIS_SCHEMA, same
+    as run_step2. Only the history feeding it differs: it already
+    contains the full one-at-a-time Q&A exchange (each answer was already
+    shown to the model inline, one round at a time), so — unlike
+    run_step2 — no separate "here are the answers" recap message is
+    needed, just a short instruction to proceed."""
+    client = _client(api_key)
+    messages = history + [
+        {"role": "user", "content": "Please proceed with the full analysis (Step 2)."}
+    ]
+    response = _call(
+        client, messages=messages, schema=ANALYSIS_SCHEMA, system=_build_system(documents)
+    )
+    data = _extract_json(response)
+    data["sharper_questions"] = list(data.get("sharper_questions", []))[:3]
     return data
 
 
