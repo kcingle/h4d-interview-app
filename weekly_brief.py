@@ -1,7 +1,7 @@
 """
 weekly_brief.py — Fills the GOVT 391 team-brief PowerPoint template
 (assets/weekly_brief_template.pptx) from a `fields` dict built by
-pages/11_Weekly_Brief.py's Stage 2 form. Called ONLY when "Build the
+pages/10_Weekly_Brief.py's Stage 2 form. Called ONLY when "Build the
 deck" is clicked — nothing here runs before that.
 
 The template's own copy (slides 1 and 3) is never touched except the

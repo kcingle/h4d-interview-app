@@ -1,5 +1,5 @@
 """
-pages/3_Documents.py — Reference documents the analysis engine can use as
+pages/6_Documents.py — Reference documents the analysis engine can use as
 context, including the permanent, protected Mom Test PDF slot (pinned,
 always included on every analysis — never a toggle — viewable and
 replaceable via upload, but never deletable).

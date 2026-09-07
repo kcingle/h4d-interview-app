@@ -1,5 +1,5 @@
 """
-pages/10_Visual_Resources.py — Every photo, video, and other file uploaded
+pages/8_Visual_Resources.py — Every photo, video, and other file uploaded
 alongside an interview on Process Interview, browsable and searchable in
 one place. Nothing lands here except what was explicitly uploaded there —
 same "nothing automatic" spirit as Documents and Dictionary. Filtering by

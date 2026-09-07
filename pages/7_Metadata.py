@@ -1,5 +1,5 @@
 """
-pages/6_Metadata.py — Browsable table of everyone interviewed (formerly
+pages/7_Metadata.py — Browsable table of everyone interviewed (formerly
 "People" — renamed for clarity, since this page is specifically the
 interviewee METADATA confirmed on Process Interview, not a general
 contacts list). Selecting a person shows their editable metadata plus

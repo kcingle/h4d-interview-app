@@ -1,5 +1,5 @@
 """
-pages/5_Settings.py — App settings. Step 2 adds the API key field the
+pages/11_Settings.py — App settings. Step 2 adds the API key field the
 Process Interview page needs.
 
 The key is saved locally to a .env file next to the app (via env_store —

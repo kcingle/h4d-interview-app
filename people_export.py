@@ -4,7 +4,7 @@ this module's name is unchanged since it's about interviewee-metadata
 records, i.e. "people", not the page label).
 
 A small, standalone module (like env_store.py) rather than logic embedded
-in pages/6_Metadata.py: it's a pure function with no Streamlit dependency,
+in pages/7_Metadata.py: it's a pure function with no Streamlit dependency,
 so it's directly unit-testable, and keeps that page's file focused on the
 page itself.
 """

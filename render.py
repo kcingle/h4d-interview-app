@@ -1,6 +1,6 @@
 """
 render.py — Shared Streamlit rendering for one processed interview's
-output. Used by both pages/1_Interviews.py and pages/6_Metadata.py (each
+output. Used by both pages/1_Interviews.py and pages/7_Metadata.py (each
 showing a past run's saved output), so both places render tables
 identically. Not AI logic (ai.py owns the API calls, including building
 the per-run digest — see ai.build_digest) and not persistence

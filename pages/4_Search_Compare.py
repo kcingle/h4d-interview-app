@@ -1,5 +1,5 @@
 """
-pages/8_Search_Compare.py — Cross-interview keyword/tag search, and
+pages/4_Search_Compare.py — Cross-interview keyword/tag search, and
 side-by-side compare of 2+ interviews on one dimension (a hypothesis or
 a topic tag). Both retrieve and organize what interviews' digests already
 say — quote-anchored, no AI call anywhere on this page, and no synthesized

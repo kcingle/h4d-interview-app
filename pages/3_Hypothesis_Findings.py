@@ -1,5 +1,5 @@
 """
-pages/7_Hypothesis_Findings.py — Roll a single hypothesis up across every
+pages/3_Hypothesis_Findings.py — Roll a single hypothesis up across every
 interview that tested it, using the enriched digests (never full
 transcripts). Renamed from "Hypothesis Status" for clarity, since it sat
 right next to "Hypotheses" (the tree management page) in the sidebar

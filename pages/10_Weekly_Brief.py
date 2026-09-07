@@ -1,5 +1,5 @@
 """
-pages/11_Weekly_Brief.py — Builds the recurring GOVT 391 team-brief
+pages/10_Weekly_Brief.py — Builds the recurring GOVT 391 team-brief
 PowerPoint from real app data, in three explicit stages where you stay in
 control the whole way (see weekly_brief.py for the template-filling
 mechanics):

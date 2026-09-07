@@ -1,5 +1,5 @@
 """
-pages/4_Chat.py — Two modes, as tabs. "Corpus Chat" talks about the
+pages/5_Chat.py — Two modes, as tabs. "Corpus Chat" talks about the
 interview corpus itself (see ai.run_chat) — every message sends the
 team's full hypothesis tree, people roster, document list, and every
 interview's raw transcript + Additional Notes + full analysis (not just
