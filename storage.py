@@ -498,6 +498,54 @@ def delete_hypothesis(hypothesis_id: int) -> None:
         release_connection(conn)
 
 
+def renumber_root_hypotheses() -> None:
+    """One-time-style cleanup: renumber root-level hypothesis labels back
+    to a contiguous 1, 2, 3... sequence (in current numeric order),
+    shifting every descendant's label to match its parent's new number
+    while leaving its own letter suffix untouched (e.g. root "6" with
+    child "6a" becomes root "1" with child "1a").
+
+    Labels only ever grow gaps from deletion: add_hypothesis/
+    _next_root_label fills a gap for the NEXT new root hypothesis, but
+    never renumbers hypotheses that already exist — so after enough
+    deletes, the remaining tree can start well above 1. This is the
+    manual reset for when that's drifted far enough to want a clean
+    renumber.
+
+    Only ever touches the text `label` column, never `id`/`parent_id` —
+    no other table is affected: runs store the hypothesis statement
+    text verbatim, never a label reference (see delete_hypothesis)."""
+    conn = get_connection()
+    try:
+        cur = _dict_cursor(conn)
+        cur.execute("SELECT id, label, parent_id FROM hypotheses")
+        rows = cur.fetchall()
+
+        children_by_parent: dict[int | None, list[dict]] = {}
+        for row in rows:
+            children_by_parent.setdefault(row["parent_id"], []).append(row)
+
+        roots = sorted(children_by_parent.get(None, []), key=lambda r: int(r["label"]))
+        new_labels: dict[int, str] = {}
+
+        def _assign(node: dict, new_label: str) -> None:
+            old_label = node["label"]
+            new_labels[node["id"]] = new_label
+            children = sorted(children_by_parent.get(node["id"], []), key=lambda c: c["label"])
+            for child in children:
+                suffix = child["label"][len(old_label):]
+                _assign(child, new_label + suffix)
+
+        for i, root in enumerate(roots, start=1):
+            _assign(root, str(i))
+
+        for hyp_id, new_label in new_labels.items():
+            cur.execute("UPDATE hypotheses SET label = %s WHERE id = %s", (new_label, hyp_id))
+        conn.commit()
+    finally:
+        release_connection(conn)
+
+
 def _normalize_hypothesis_text(text: str) -> str:
     """Whitespace/case-normalized form used to match a run's
     hypothesis_text against a tree node's statement. Deliberately exact

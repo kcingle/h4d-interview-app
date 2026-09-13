@@ -8,7 +8,8 @@ storage with rerun history, a hypothesis tree, reference documents (with
 a pinned Mom Test doc), interviewee metadata + a Metadata view (with a
 one-click Excel export), exporting a run to Markdown/.txt,
 cross-interview corpus features (Hypothesis Findings, Search & Compare),
-and a corpus-wide Chat are all built and working. Every page that lets
+and a corpus-wide Chat (now combined with Search & Compare on one page)
+are all built and working. Every page that lets
 you add a hypothesis, interview, or person also lets you delete one —
 always behind a confirm/cancel step.
 
@@ -83,35 +84,37 @@ and past runs — works with no key.
   and the hypothesis's full version lineage with its own per-version
   counts. This page only organizes what interviews already said — it
   never generates a summary interpretation.
-- **Search & Compare** — keyword/tag search over every interview's
-  digest (plain substring matching — no semantic search, no vector DB),
-  returning real, attributed, verbatim quotes; and a side-by-side compare
-  of 2+ interviews on one hypothesis or topic tag. Like Hypothesis
-  Findings, this only retrieves and organizes what was already said —
-  never an AI-written "here's the contrast" summary.
-- **Chat** — two tabs. **Corpus Chat** is a real conversation over the
-  whole corpus, unlike Hypothesis Findings/Search & Compare's
-  zero-synthesis retrieval: every message sends the full hypothesis
-  tree, people roster, document list, and every interview's raw
-  transcript + Additional Notes + complete analysis (not just its
-  digest) as context (`ai.build_corpus_context`) — cached after the
-  first turn each session, so later turns are cheap; only the first
-  message and an explicit "Refresh context" pay full price. Answers
-  cite which interview a finding came from, and the system prompt tells
-  the model to say so plainly rather than guess when something isn't in
-  the material — verified live: it correctly declined to answer about
-  an interview that doesn't exist in the corpus. **Background &
-  Definitions** (`ai.define_terms`) is a different kind of assistant:
-  it explains words/acronyms/concepts, and — unlike everywhere else in
-  this app — is explicitly allowed to use general domain knowledge, not
-  just the corpus (verified live: correctly gave the standard DoD
-  meaning of an ambiguous acronym when the corpus was empty, rather
-  than guessing). Each definition has an "Add to dictionary" button;
-  nothing saves automatically.
-- **Dictionary** — every term saved from Chat's Background &
-  Definitions tab: search by term or definition text, mark an entry
-  high-importance (sorts it to the top), or delete it. Pure browsing —
-  no AI calls happen here.
+- **Search, Compare & Chat** — one page, four tabs. **Search** is
+  keyword/tag search over every interview's digest (plain substring
+  matching — no semantic search, no vector DB), returning real,
+  attributed, verbatim quotes. **Compare** is a side-by-side compare of
+  2+ interviews on one hypothesis or topic tag. Like Hypothesis
+  Findings, both of those only retrieve and organize what was already
+  said — never an AI-written "here's the contrast" summary.
+  **Corpus Chat** is a real conversation over the whole corpus, unlike
+  Search/Compare's zero-synthesis retrieval: every message sends the
+  full hypothesis tree, people roster, document list, and every
+  interview's raw transcript + Additional Notes + complete analysis
+  (not just its digest) as context (`ai.build_corpus_context`) — cached
+  after the first turn each session, so later turns are cheap; only the
+  first message and an explicit "Refresh context" pay full price.
+  Answers cite which interview a finding came from, and the system
+  prompt tells the model to say so plainly rather than guess when
+  something isn't in the material — verified live: it correctly
+  declined to answer about an interview that doesn't exist in the
+  corpus. **Background & Definitions** (`ai.define_terms`) is a
+  different kind of assistant: it explains words/acronyms/concepts, and
+  — unlike everywhere else in this app — is explicitly allowed to use
+  general domain knowledge, not just the corpus (verified live:
+  correctly gave the standard DoD meaning of an ambiguous acronym when
+  the corpus was empty, rather than guessing). Each definition has an
+  "Add to dictionary" button; nothing saves automatically. Corpus Chat
+  and Background & Definitions share one cached corpus context per
+  session, same as before the two pages were merged.
+- **Dictionary** — every term saved from Search, Compare & Chat's
+  Background & Definitions tab: search by term or definition text, mark
+  an entry high-importance (sorts it to the top), or delete it. Pure
+  browsing — no AI calls happen here.
 - **Settings** — enter your Anthropic API key. Saved locally to a `.env`
   file next to the app (gitignored — never committed, see `env_store.py`),
   so every page that calls the API sees the same key, and it survives

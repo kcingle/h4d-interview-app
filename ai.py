@@ -1156,9 +1156,18 @@ def suggest_hypotheses(corpus_context: str, api_key: str) -> list[dict]:
     AIError on failure — it's a primary action the user explicitly
     triggered by clicking a button, so a failure should be visible, not
     swallowed into a quietly-empty suggestion list.
+
+    `system` carries `cache_control` (like run_chat's) so repeated
+    clicks against an unchanged corpus read the cached prefix instead of
+    re-paying full price on this same large blob every time — this was
+    previously sent as a plain string with no caching at all.
     """
     client = _client(api_key)
-    system = f"{_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT}\n\n{corpus_context}"
+    system = [{
+        "type": "text",
+        "text": f"{_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT}\n\n{corpus_context}",
+        "cache_control": {"type": "ephemeral"},
+    }]
     response = _call(
         client,
         messages=[{
@@ -1236,9 +1245,18 @@ def define_terms(query: str, corpus_context: str, api_key: str) -> list[dict]:
     Raises AIError on failure — like suggest_hypotheses, this is a
     primary action the user explicitly triggered, so a failure should be
     visible rather than silently swallowed.
+
+    `system` carries `cache_control` (like run_chat's) so repeated asks
+    against an unchanged corpus read the cached prefix instead of
+    re-paying full price on this same large blob every time — this was
+    previously sent as a plain string with no caching at all.
     """
     client = _client(api_key)
-    system = f"{_DEFINE_TERMS_SYSTEM_PROMPT}\n\n{corpus_context}"
+    system = [{
+        "type": "text",
+        "text": f"{_DEFINE_TERMS_SYSTEM_PROMPT}\n\n{corpus_context}",
+        "cache_control": {"type": "ephemeral"},
+    }]
     response = _call(
         client,
         messages=[{"role": "user", "content": query}],

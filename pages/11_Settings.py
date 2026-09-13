@@ -16,6 +16,7 @@ import streamlit as st
 
 import auth
 import env_store
+import storage
 
 st.set_page_config(page_title="H4D Interview App — Settings", page_icon="⚙️")
 auth.require_login()
@@ -59,6 +60,37 @@ else:
         st.success("API key saved — available on every page, including after a restart.")
     else:
         st.caption("No API key saved yet. Paste one above to enable AI processing.")
+
+st.divider()
+st.subheader("Hypothesis label maintenance")
+st.caption(
+    "Deleting hypotheses leaves gaps — a new root hypothesis fills the "
+    "lowest free number, but existing ones are never renumbered, so the "
+    "tree can drift to start well above 1. This renumbers every root "
+    "label back to a clean 1, 2, 3... sequence (in current order), "
+    "shifting each descendant's label to match its parent while leaving "
+    "its own letter suffix untouched (e.g. root \"6\" / child \"6a\" "
+    "becomes root \"1\" / child \"1a\"). Hypothesis text, state, and tree "
+    "structure are untouched — only the label text changes."
+)
+if st.button("🔧 Renumber hypothesis labels"):
+    st.session_state["show_renumber_confirm"] = True
+
+if st.session_state.get("show_renumber_confirm"):
+    st.warning("This can't be undone by itself. Renumber every hypothesis label now?")
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        confirm_renumber = st.button("Yes, renumber", key="confirm_renumber_btn")
+    with rc2:
+        cancel_renumber = st.button("Cancel", key="cancel_renumber_btn")
+    if confirm_renumber:
+        storage.renumber_root_hypotheses()
+        st.session_state.pop("show_renumber_confirm", None)
+        st.success("Hypothesis labels renumbered — check the Hypotheses page.")
+        st.rerun()
+    if cancel_renumber:
+        st.session_state.pop("show_renumber_confirm", None)
+        st.rerun()
 
 st.divider()
 st.caption("More settings will land here in later steps.")

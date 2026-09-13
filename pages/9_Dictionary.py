@@ -1,7 +1,7 @@
 """
-pages/9_Dictionary.py — Terms saved from Chat's "Background &
-Definitions" tab (see ai.define_terms). Nothing lands here
-automatically — every entry was explicitly added via that tab's
+pages/9_Dictionary.py — Terms saved from Search, Compare & Chat's
+"Background & Definitions" tab (see ai.define_terms). Nothing lands
+here automatically — every entry was explicitly added via that tab's
 "➕ Add to dictionary" button. This page is purely browsing/managing
 what's already saved: search, mark important, and delete — no AI calls.
 """
@@ -16,16 +16,17 @@ auth.require_login()
 
 st.title("Dictionary")
 st.caption(
-    "Terms, acronyms, and concepts saved from Chat's Background & "
-    "Definitions tab. Nothing is added here automatically."
+    "Terms, acronyms, and concepts saved from Search, Compare & Chat's "
+    "Background & Definitions tab. Nothing is added here automatically."
 )
 
 entries = storage.get_dictionary_entries()
 
 if not entries:
     st.write(
-        "No terms saved yet. Go to **Chat → Background & Definitions**, "
-        "ask what something means, and click \"Add to dictionary\"."
+        "No terms saved yet. Go to **Search, Compare & Chat → Background "
+        "& Definitions**, ask what something means, and click "
+        "\"Add to dictionary\"."
     )
     st.stop()
 
