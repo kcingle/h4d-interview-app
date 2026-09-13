@@ -923,7 +923,7 @@ def build_digest(
 CHAT_SYSTEM_INSTRUCTIONS = (
     "You are a research assistant helping a Hacking for Defense (H4D) "
     "student team review everything they've learned across their DoD "
-    "customer-discovery interviews. Below this message is the team's "
+    "customer-discovery interviews. Above this message is the team's "
     "complete hypothesis tree, their interviewee roster, their reference "
     "document list, and — for every interview logged so far — its raw "
     "transcript, any additional interviewer notes, and the full analysis "
@@ -933,7 +933,7 @@ CHAT_SYSTEM_INSTRUCTIONS = (
     "interview it comes from (its title and/or date) so the team can "
     "trace it back. If something the team asks about isn't covered by "
     "this material, say so plainly instead of guessing — never invent a "
-    "quote, a number, or a finding that isn't actually below. You may "
+    "quote, a number, or a finding that isn't actually there. You may "
     "synthesize across multiple interviews (spot a pattern, count how "
     "many validated a hypothesis, compare two interviewees) as long as "
     "every individual claim inside that synthesis still traces back to a "
@@ -1057,6 +1057,41 @@ def build_corpus_context(
     return "\n".join(lines)
 
 
+def _corpus_system_blocks(instructions: str, corpus_context: str) -> list[dict]:
+    """Shared system-prompt shape for every feature grounded in
+    build_corpus_context (run_chat, suggest_hypotheses, define_terms):
+    the large corpus blob first, as its own cached block, with the
+    short feature-specific instructions appended after it.
+
+    Corpus-first isn't just a caching convenience — it's also the
+    layout Anthropic's own long-context guidance recommends (reference
+    material before the instructions that use it). But the caching
+    payoff is the main reason it's shared here: since `corpus_context`
+    is byte-identical across all three features (same DB state, same
+    build_corpus_context call), and it's now the FIRST thing in the
+    prefix rather than sitting after each feature's own differently-
+    worded instructions, all three requests cache-match on the exact
+    same prefix. Whichever feature is used first in a session warms
+    this block for the other two — they read it at cache-read price
+    instead of each paying full price independently.
+
+    1-hour TTL, not the 5-minute ephemeral default: a person reading an
+    interview or thinking between chat messages routinely exceeds 5
+    minutes, which would otherwise fall back to full price silently.
+    """
+    return [
+        {
+            "type": "text",
+            "text": corpus_context,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+        {
+            "type": "text",
+            "text": instructions,
+        },
+    ]
+
+
 def run_chat(
     history: list[dict], user_message: str, api_key: str, corpus_context: str
 ) -> dict:
@@ -1073,11 +1108,7 @@ def run_chat(
     pass back in as-is on the next call.
     """
     client = _client(api_key)
-    system = [{
-        "type": "text",
-        "text": f"{CHAT_SYSTEM_INSTRUCTIONS}\n\n{corpus_context}",
-        "cache_control": {"type": "ephemeral"},
-    }]
+    system = _corpus_system_blocks(CHAT_SYSTEM_INSTRUCTIONS, corpus_context)
     messages = history + [{"role": "user", "content": user_message}]
     response = _call(client, messages=messages, system=system, max_tokens=4096)
     reply = _extract_text(response)
@@ -1096,7 +1127,7 @@ def run_chat(
 _HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT = (
     "You help a Hacking for Defense (H4D) student team refine their DoD "
     "customer-discovery hypothesis tree, based on everything they've "
-    "learned so far. Below is their full existing hypothesis tree and "
+    "learned so far. Above is their full existing hypothesis tree and "
     "every interview logged so far (transcripts, additional notes, and "
     "the complete analysis for every run). Propose new candidate "
     "hypotheses worth testing next — a new root-level hypothesis, a "
@@ -1107,7 +1138,7 @@ _HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT = (
     "Ground every suggestion in something specific the interviews "
     "actually said; name which interview(s) support it in the "
     "rationale. Never invent a finding that isn't in the material "
-    "below — if there isn't enough material yet to responsibly suggest "
+    "above — if there isn't enough material yet to responsibly suggest "
     "anything (e.g. no interviews logged yet), return an empty list "
     "rather than guessing. Suggest at most 8. For each one, if it "
     "naturally belongs as a child of an existing hypothesis, give that "
@@ -1157,17 +1188,16 @@ def suggest_hypotheses(corpus_context: str, api_key: str) -> list[dict]:
     triggered by clicking a button, so a failure should be visible, not
     swallowed into a quietly-empty suggestion list.
 
-    `system` carries `cache_control` (like run_chat's) so repeated
+    `system` uses _corpus_system_blocks (like run_chat's) so repeated
     clicks against an unchanged corpus read the cached prefix instead of
     re-paying full price on this same large blob every time — this was
-    previously sent as a plain string with no caching at all.
+    previously sent as a plain string with no caching at all. Sharing
+    that helper also means this can cache-match Corpus Chat's and
+    Background & Definitions' requests, since all three now put the
+    identical corpus blob first.
     """
     client = _client(api_key)
-    system = [{
-        "type": "text",
-        "text": f"{_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT}\n\n{corpus_context}",
-        "cache_control": {"type": "ephemeral"},
-    }]
+    system = _corpus_system_blocks(_HYPOTHESIS_SUGGESTIONS_SYSTEM_PROMPT, corpus_context)
     response = _call(
         client,
         messages=[{
@@ -1194,7 +1224,7 @@ def suggest_hypotheses(corpus_context: str, api_key: str) -> list[dict]:
 _DEFINE_TERMS_SYSTEM_PROMPT = (
     "You are a specialized assistant that ONLY explains what words, "
     "acronyms, or concepts mean, for a Hacking for Defense (H4D) "
-    "student team's DoD customer-discovery work. Below is the team's "
+    "student team's DoD customer-discovery work. Above is the team's "
     "corpus (hypotheses, people, documents, interviews) for context.\n\n"
     "Given the team's question, identify every distinct term, acronym, "
     "or concept they're asking about and define each one clearly and "
@@ -1246,17 +1276,16 @@ def define_terms(query: str, corpus_context: str, api_key: str) -> list[dict]:
     primary action the user explicitly triggered, so a failure should be
     visible rather than silently swallowed.
 
-    `system` carries `cache_control` (like run_chat's) so repeated asks
-    against an unchanged corpus read the cached prefix instead of
+    `system` uses _corpus_system_blocks (like run_chat's) so repeated
+    asks against an unchanged corpus read the cached prefix instead of
     re-paying full price on this same large blob every time — this was
-    previously sent as a plain string with no caching at all.
+    previously sent as a plain string with no caching at all. Sharing
+    that helper also means this can cache-match Corpus Chat's and
+    Suggest Hypotheses' requests, since all three now put the identical
+    corpus blob first.
     """
     client = _client(api_key)
-    system = [{
-        "type": "text",
-        "text": f"{_DEFINE_TERMS_SYSTEM_PROMPT}\n\n{corpus_context}",
-        "cache_control": {"type": "ephemeral"},
-    }]
+    system = _corpus_system_blocks(_DEFINE_TERMS_SYSTEM_PROMPT, corpus_context)
     response = _call(
         client,
         messages=[{"role": "user", "content": query}],
