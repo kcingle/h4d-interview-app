@@ -6,10 +6,14 @@ SELECTION for processing an interview comes in a later step — this page
 is only about building/maintaining the tree itself.
 
 Two view modes: "List (edit)" (the original tree, with add/edit/toggle
-controls) and "Visual tree" (read-only, a real clickable expand/collapse
-diagram — see build_visual_tree_html). The visual tree is plain HTML
-(nested <details>/<summary>, native browser disclosure — no JS, no new
-dependency, works fully offline) rendered via
+controls) and "Visual tree" (read-only, a real branching node/edge
+diagram — see build_zoomable_tree_html) — drag to pan, scroll or the
++/−/⤾ buttons to zoom, each node showing how many times it's been
+tested and validated (storage.get_hypothesis_test_counts), live off the
+same tree/digest data every other page reads (nothing to refresh:
+processing a new interview updates it on the next rerun). It's plain
+SVG plus a small hand-rolled pointer/wheel-event script for the pan/
+zoom — no new dependency (no JS library, no graphviz) — rendered via
 streamlit.components.v1.html; editing still only happens in List view.
 
 Hypotheses are never auto-added — the "Suggest hypotheses" section below
@@ -20,6 +24,7 @@ they want and clicks "Add approved".
 """
 
 import html as html_lib
+import textwrap
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -185,10 +190,6 @@ def render_node(node: dict, depth: int) -> None:
         render_node(child, depth + 1)
 
 
-def _count_nodes(nodes: list[dict]) -> int:
-    return sum(1 + _count_nodes(n["children"]) for n in nodes)
-
-
 def _label_to_id(nodes: list[dict]) -> dict[str, int]:
     """Flatten the tree into {label: id}, for resolving a suggestion's
     suggested_parent_label back to a real parent_id."""
@@ -215,72 +216,263 @@ def _build_corpus_context_for_suggestions() -> str:
     return ai.build_corpus_context(hypotheses_tree, interviews, people, documents)
 
 
-def _visual_tree_node_html(node: dict) -> str:
-    """One node's HTML: a <details>/<summary> if it has children (so it's
-    a real click-to-expand/collapse toggle), or a plain row if it's a
-    leaf (nothing to expand). Text is HTML-escaped since a hypothesis's
-    text is free-form user input being embedded directly into markup."""
-    is_dormant = node["state"] == "dormant"
-    state_class = "dormant" if is_dormant else "active"
-    label = html_lib.escape(node["label"])
-    text = html_lib.escape(node["text"])
-    badge = f'<span class="badge {state_class}">{state_class}</span>'
-    row = f'<span class="label">{label}</span> {badge} {text}'
-
-    children = node.get("children") or []
-    if children:
-        children_html = "".join(_visual_tree_node_html(c) for c in children)
-        return (
-            f'<details class="node {state_class}" open>'
-            f"<summary>{row}</summary>"
-            f'<div class="children">{children_html}</div>'
-            f"</details>"
-        )
-    return f'<div class="node leaf {state_class}">{row}</div>'
+_NODE_W = 210
+_NODE_H = 108
+_H_GAP = 30
+_LEVEL_H = 150
+_MARGIN = 40
+_VIEWPORT_H = 620
 
 
-def build_visual_tree_html(tree: list[dict]) -> str:
-    """A self-contained HTML page: a real clickable expand/collapse tree
-    diagram, using only native <details>/<summary> disclosure (no JS, no
-    new dependency, works fully offline) — rendered via
-    streamlit.components.v1.html, which sandboxes it in an iframe."""
+def _layout_hypothesis_tree(tree: list[dict]) -> dict:
+    """Simple bottom-up tree layout: every leaf gets the next unused
+    horizontal slot (left to right, in existing tree order), every
+    internal node is centered over the mean of its children's x — a
+    standard, good-enough-for-a-modest-tree approach (not a minimal-
+    width Reingold-Tilford layout, which isn't worth the complexity at
+    this app's scale). Depth sets y directly, so every level lines up
+    in a straight horizontal band.
+
+    Returns {"positions": {id: {"x","y","node","depth"}}, "edges":
+    [(parent_id, child_id), ...], "width", "height", "max_depth"} — all
+    in SVG pixel units, unscaled (offset by _MARGIN so nothing touches
+    the edge)."""
+    positions: dict[int, dict] = {}
+    edges: list[tuple[int, int]] = []
+    next_slot = [0]
+    max_depth = [0]
+
+    def _place(nodes: list[dict], depth: int) -> None:
+        max_depth[0] = max(max_depth[0], depth)
+        for node in nodes:
+            children = node.get("children") or []
+            if children:
+                _place(children, depth + 1)
+                xs = [positions[c["id"]]["x"] for c in children]
+                x = sum(xs) / len(xs)
+            else:
+                x = next_slot[0] * (_NODE_W + _H_GAP)
+                next_slot[0] += 1
+            positions[node["id"]] = {
+                "x": x, "y": depth * _LEVEL_H, "node": node, "depth": depth,
+            }
+            for c in children:
+                edges.append((node["id"], c["id"]))
+
+    _place(tree, 0)
+    width = max((p["x"] for p in positions.values()), default=0) + _NODE_W + 2 * _MARGIN
+    height = (max_depth[0] + 1) * _LEVEL_H + 2 * _MARGIN
+    return {
+        "positions": positions, "edges": edges,
+        "width": width, "height": height, "max_depth": max_depth[0],
+    }
+
+
+def _stats_line(counts: dict) -> tuple[str, str]:
+    """(text, color) for one node's test-count line. Distinguishes
+    "never tested" from "tested but never validated" — both matter and
+    look identical if collapsed into one number."""
+    tested = counts["tested"]
+    if tested == 0:
+        return "Not tested yet", "#888"
+    bits = [f"🧪 {tested} tested"]
+    if counts["validated"]:
+        bits.append(f"✅ {counts['validated']}")
+    if counts["invalidated"]:
+        bits.append(f"❌ {counts['invalidated']}")
+    color = "#1a7f37" if counts["validated"] and not counts["invalidated"] else "#4a4a4a"
+    return "  ·  ".join(bits), color
+
+
+def build_zoomable_tree_html(tree: list[dict], counts_by_id: dict[int, dict]) -> str:
+    """A real branching node/edge tree diagram — SVG nodes connected by
+    curved edges, laid out top-down by depth (see
+    _layout_hypothesis_tree) — inside a hand-rolled pan/zoom viewport:
+    drag to pan, scroll (or the +/−/reset buttons) to zoom. Deliberately
+    no new dependency (no JS library, no graphviz): it's plain SVG plus
+    ~30 lines of vanilla pointer/wheel-event JS applying a CSS
+    transform, rendered via streamlit.components.v1.html, which
+    sandboxes it in its own iframe.
+
+    Always fully expanded (no collapse) — the point of a real tree
+    diagram is seeing how it branches at a glance; pan/zoom is how you
+    navigate a tree too big to fit on screen, not collapsing replaces
+    it. Recomputed from live data on every rerun (get_hypothesis_tree
+    and get_hypothesis_test_counts are both fresh queries, no caching
+    anywhere in this app), so it reflects the current tree and the
+    latest interview the moment either changes — nothing to refresh."""
     if not tree:
-        body = '<p class="empty">No hypotheses yet — add one in List view.</p>'
-    else:
-        body = "".join(_visual_tree_node_html(root) for root in tree)
+        return (
+            '<div style="font-family:-apple-system,\'Segoe UI\',sans-serif;'
+            'color:#888;font-style:italic;padding:12px;">'
+            "No hypotheses yet — add one in List view.</div>"
+        )
+
+    layout = _layout_hypothesis_tree(tree)
+    positions, edges = layout["positions"], layout["edges"]
+
+    edge_svg = []
+    for parent_id, child_id in edges:
+        p, c = positions[parent_id], positions[child_id]
+        x1, y1 = p["x"] + _NODE_W / 2 + _MARGIN, p["y"] + _NODE_H + _MARGIN
+        x2, y2 = c["x"] + _NODE_W / 2 + _MARGIN, c["y"] + _MARGIN
+        mid_y = (y1 + y2) / 2
+        edge_svg.append(
+            f'<path d="M {x1},{y1} C {x1},{mid_y} {x2},{mid_y} {x2},{y2}" '
+            f'fill="none" stroke="#c7c7cf" stroke-width="2" />'
+        )
+
+    node_svg = []
+    for hyp_id, p in positions.items():
+        node = p["node"]
+        is_dormant = node["state"] == "dormant"
+        fill, stroke, text_color = (
+            ("#eaeaea", "#bdbdbd", "#777") if is_dormant else ("#d7f3df", "#8fd4a3", "#14532d")
+        )
+        x, y = p["x"] + _MARGIN, p["y"] + _MARGIN
+        label = html_lib.escape(f"{node['label']} · {'dormant' if is_dormant else 'active'}")
+        full_text = node["text"]
+        wrapped = textwrap.wrap(full_text, width=30)[:3]
+        if len(textwrap.wrap(full_text, width=30)) > 3:
+            wrapped[-1] = wrapped[-1].rstrip()[:27] + "…"
+        stats_text, stats_color = _stats_line(
+            counts_by_id.get(hyp_id, {"tested": 0, "validated": 0, "invalidated": 0, "untested": 0})
+        )
+
+        lines = [f'<tspan x="16" dy="0">{label}</tspan>']
+        for i, line in enumerate(wrapped):
+            lines.append(f'<tspan x="16" dy="{18 if i == 0 else 16}">{html_lib.escape(line)}</tspan>')
+        text_lines = "".join(lines)
+        stats_dy = 18 + 16 * max(len(wrapped) - 1, 0) + 22
+
+        node_svg.append(f"""
+            <g transform="translate({x},{y})">
+                <title>{html_lib.escape(full_text)}</title>
+                <rect width="{_NODE_W}" height="{_NODE_H}" rx="10"
+                      fill="{fill}" stroke="{stroke}" stroke-width="1.5" />
+                <text y="14" font-family="-apple-system,'Segoe UI',sans-serif"
+                      font-size="13" font-weight="700" fill="{text_color}">{text_lines}</text>
+                <text x="16" y="{stats_dy}" font-family="-apple-system,'Segoe UI',sans-serif"
+                      font-size="11" fill="{stats_color}">{html_lib.escape(stats_text)}</text>
+            </g>""")
+
+    svg = (
+        f'<svg width="{layout["width"]}" height="{layout["height"]}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'{"".join(edge_svg)}{"".join(node_svg)}</svg>'
+    )
+
+    # Auto-fit: start zoomed so the whole tree's width is visible, and
+    # never zoomed further IN than 1x for a small tree (no reason to
+    # start magnified). Centers it so the tree isn't pinned to a corner.
+    viewport_w_estimate = 900  # components.html width isn't knowable in
+    # Python at render time — Streamlit sizes the iframe to its column
+    # width — so this is a reasonable default main-column estimate; the
+    # zoom controls (and scroll-to-zoom) immediately correct for any gap.
+    initial_scale = min(1.0, max(0.2, viewport_w_estimate / layout["width"]))
+    initial_tx = max(0.0, (viewport_w_estimate - layout["width"] * initial_scale) / 2)
+    initial_ty = 20.0
+
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
-        body {{ font-family: -apple-system, "Segoe UI", sans-serif; font-size: 14px;
-                margin: 0; padding: 4px 8px; color: #1a1a1a; background: transparent; }}
-        details.node {{ margin: 4px 0; }}
-        details.node > summary {{ cursor: pointer; padding: 6px 8px; border-radius: 6px;
-                background: #f2f2f5; list-style: none; }}
-        details.node > summary::-webkit-details-marker {{ display: none; }}
-        details.node > summary::before {{ content: "▸  "; color: #888; }}
-        details.node[open] > summary::before {{ content: "▾  "; color: #888; }}
-        .children {{ margin-left: 20px; border-left: 2px solid #e2e2e6; padding-left: 12px; }}
-        .node.leaf {{ padding: 6px 8px; margin: 4px 0; border-radius: 6px; background: #f2f2f5; }}
-        .label {{ font-weight: 700; }}
-        .badge {{ font-size: 11px; padding: 1px 7px; border-radius: 10px; margin-right: 2px; }}
-        .badge.active {{ background: #d7f3df; color: #1a7f37; }}
-        .badge.dormant {{ background: #eaeaea; color: #777; }}
-        .node.dormant {{ opacity: 0.7; }}
-        .empty {{ color: #888; font-style: italic; }}
-        </style></head><body>{body}</body></html>"""
+        html, body {{ margin: 0; padding: 0; font-family: -apple-system, "Segoe UI", sans-serif; }}
+        #viewport {{
+            width: 100%; height: {_VIEWPORT_H}px; overflow: hidden; position: relative;
+            border: 1px solid #e2e2e6; border-radius: 8px; background: #fafafa; cursor: grab;
+            touch-action: none;
+        }}
+        #canvasWrap {{ position: absolute; top: 0; left: 0; transform-origin: 0 0; }}
+        .controls {{ position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 2; }}
+        .controls button {{
+            width: 30px; height: 30px; border-radius: 6px; border: 1px solid #d0d0d6;
+            background: white; font-size: 15px; cursor: pointer; color: #333;
+        }}
+        .controls button:hover {{ background: #f2f2f5; }}
+        .hint {{
+            position: absolute; bottom: 8px; left: 12px; font-size: 11px; color: #999;
+            z-index: 2; pointer-events: none;
+        }}
+        </style></head><body>
+        <div id="viewport">
+            <div id="canvasWrap">{svg}</div>
+            <div class="controls">
+                <button id="zoomOut" title="Zoom out">−</button>
+                <button id="zoomReset" title="Reset view">⤾</button>
+                <button id="zoomIn" title="Zoom in">+</button>
+            </div>
+            <div class="hint">Drag to pan · Scroll to zoom</div>
+        </div>
+        <script>
+        (function() {{
+            var viewport = document.getElementById('viewport');
+            var canvas = document.getElementById('canvasWrap');
+            var scale = {initial_scale}, tx = {initial_tx}, ty = {initial_ty};
+            var initScale = scale, initTx = tx, initTy = ty;
+            var dragging = false, lastX = 0, lastY = 0;
+
+            function apply() {{
+                canvas.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+            }}
+            apply();
+
+            viewport.addEventListener('pointerdown', function(e) {{
+                dragging = true; lastX = e.clientX; lastY = e.clientY;
+                viewport.style.cursor = 'grabbing';
+                viewport.setPointerCapture(e.pointerId);
+            }});
+            viewport.addEventListener('pointerup', function() {{
+                dragging = false; viewport.style.cursor = 'grab';
+            }});
+            viewport.addEventListener('pointercancel', function() {{
+                dragging = false; viewport.style.cursor = 'grab';
+            }});
+            viewport.addEventListener('pointermove', function(e) {{
+                if (!dragging) return;
+                tx += e.clientX - lastX; ty += e.clientY - lastY;
+                lastX = e.clientX; lastY = e.clientY;
+                apply();
+            }});
+            viewport.addEventListener('wheel', function(e) {{
+                e.preventDefault();
+                var rect = viewport.getBoundingClientRect();
+                var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+                var prevScale = scale;
+                scale = Math.min(3, Math.max(0.15, scale * (e.deltaY < 0 ? 1.12 : 0.89)));
+                tx = mx - (mx - tx) * (scale / prevScale);
+                ty = my - (my - ty) * (scale / prevScale);
+                apply();
+            }}, {{passive: false}});
+
+            document.getElementById('zoomIn').onclick = function() {{
+                scale = Math.min(3, scale * 1.25); apply();
+            }};
+            document.getElementById('zoomOut').onclick = function() {{
+                scale = Math.max(0.15, scale * 0.8); apply();
+            }};
+            document.getElementById('zoomReset').onclick = function() {{
+                scale = initScale; tx = initTx; ty = initTy; apply();
+            }};
+        }})();
+        </script>
+        </body></html>"""
 
 
 tree = storage.get_hypothesis_tree()
 
 view_mode = st.radio(
     "View as",
-    ["List (edit)", "Visual tree (click to expand/collapse)"],
+    ["List (edit)", "Visual tree (branches, drag/zoom)"],
     horizontal=True,
 )
 
 if view_mode.startswith("Visual"):
-    st.caption("Read-only — switch to List view to add, edit, or toggle active/dormant.")
-    node_count = _count_nodes(tree)
-    height = min(max(160, 46 * max(node_count, 1) + 80), 700)
-    components.html(build_visual_tree_html(tree), height=height, scrolling=True)
+    st.caption(
+        "Read-only — switch to List view to add, edit, or toggle active/dormant. "
+        "Drag to pan, scroll (or the +/−/⤾ buttons) to zoom. Test/validate counts "
+        "come from every interview's digest and update the moment a new one is "
+        "processed — nothing here needs a manual refresh."
+    )
+    counts_by_id = storage.get_hypothesis_test_counts(tree)
+    components.html(build_zoomable_tree_html(tree, counts_by_id), height=_VIEWPORT_H + 10, scrolling=False)
 else:
     st.subheader("Lineage overview")
     st.code(build_ascii_summary(tree), language=None)

@@ -652,6 +652,74 @@ def get_hypothesis_status_rollup(hypothesis_statement: str) -> dict:
     return {"counts": counts, "quote_backed": quote_backed, "unsupported": unsupported}
 
 
+def get_hypothesis_test_counts(tree: list[dict]) -> dict[int, dict]:
+    """Single-pass roll-up of test/validate counts for every node in
+    `tree` (see get_hypothesis_tree), keyed by hypothesis id — for the
+    Hypotheses page's visual tree, which needs this for every node at
+    once. Matches a run to a node the same way
+    get_hypothesis_status_rollup matches one hypothesis (exact
+    normalized statement text — see _normalize_hypothesis_text), but
+    computed once over the whole corpus instead of once per hypothesis:
+    get_hypothesis_status_rollup re-scans every interview/run per call,
+    fine for looking up one hypothesis on Hypothesis Findings, too slow
+    to call once per node when rendering a whole tree.
+
+    Returns {hypothesis_id: {"tested": n, "validated": n,
+    "invalidated": n, "untested": n}} — every id in `tree` is present,
+    all-zero if nothing has tested it yet. If two nodes happen to share
+    identical (normalized) statement text, both are credited for a run
+    that tested it — same as calling get_hypothesis_status_rollup
+    separately for each would do."""
+    def _flatten(nodes: list[dict]) -> list[dict]:
+        flat = []
+        for node in nodes:
+            flat.append(node)
+            flat.extend(_flatten(node["children"]))
+        return flat
+
+    result: dict[int, dict] = {}
+    ids_by_norm: dict[str, list[int]] = {}
+    for node in _flatten(tree):
+        result[node["id"]] = {"tested": 0, "validated": 0, "invalidated": 0, "untested": 0}
+        ids_by_norm.setdefault(_normalize_hypothesis_text(node["text"]), []).append(node["id"])
+
+    for interview in get_interviews():
+        for run in get_runs_for_interview(interview["id"]):
+            tested_norms = {_normalize_hypothesis_text(h) for h in run["hypotheses"]}
+            relevant = tested_norms & ids_by_norm.keys()
+            if not relevant:
+                continue
+
+            digest = run.get("digest") or {}
+            if digest.get("digest_version", 1) < 2:
+                # Old thin digest: one status for the whole run, applied
+                # to every hypothesis it tested — no per-hypothesis
+                # ledger to attribute against (same fallback
+                # get_hypothesis_status_rollup uses).
+                status = digest.get("status", "Untested")
+                for norm in relevant:
+                    for hyp_id in ids_by_norm[norm]:
+                        bucket = result[hyp_id]
+                        bucket["tested"] += 1
+                        key = status.lower()
+                        bucket[key] = bucket.get(key, 0) + 1
+                continue
+
+            hyp_entries = digest.get("hypotheses") or []
+            for norm in relevant:
+                entry = _find_digest_entry_for_hypothesis(hyp_entries, norm)
+                if entry is None:
+                    continue  # can't confidently attribute -- skip, don't guess
+                status = entry.get("status", "Untested")
+                for hyp_id in ids_by_norm[norm]:
+                    bucket = result[hyp_id]
+                    bucket["tested"] += 1
+                    key = status.lower()
+                    bucket[key] = bucket.get(key, 0) + 1
+
+    return result
+
+
 def get_runs_testing_hypothesis(hypothesis_statement: str) -> list[dict]:
     """Every run (across every interview) that tested this exact
     hypothesis text — same matching rule as get_hypothesis_status_rollup
