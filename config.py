@@ -7,8 +7,18 @@ in-app on the Settings page and kept only in Streamlit's session state for
 now (not yet persisted to disk; that's planned for a later step).
 """
 
-# Model used for all AI calls in ai.py.
+# Model used for the graded interview analysis and the adaptive
+# clarifying-question loop that feeds it.
 MODEL_NAME = "claude-sonnet-5"
+
+# Cheaper/faster model for small, non-graded, checkable-output calls that
+# don't need Sonnet-level judgment: interviewee-metadata suggestion and
+# digest topic-tagging. Neither is part of the graded analysis rubric, and
+# both are simple extraction tasks the user reviews before anything is
+# saved (metadata) or that only feed internal search (topic tags) — a
+# cheaper model here cuts cost with low quality risk. Haiku 4.5 has no
+# `effort` parameter (it errors), so calls using this model never pass one.
+MODEL_NAME_SMALL = "claude-haiku-4-5"
 
 # Anthropic API version. The official Python SDK (used in ai.py) sets this
 # header automatically on every request, so this constant is kept here as

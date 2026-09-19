@@ -315,6 +315,37 @@ def get_interview(interview_id: int) -> dict | None:
         release_connection(conn)
 
 
+def build_interview_title(name: str, rank: str, interview_date: str) -> str:
+    """Build the one standard interview title format: "(rank name, date)",
+    or "(name, date)" if no rank applies. This is applied automatically —
+    once right after interviewee metadata is confirmed on the Interviews
+    page, and again whenever that person's name/rank/date is edited later
+    on the Metadata page — so every interview's title stays in this same
+    format without anyone having to rename it by hand."""
+    name = (name or "").strip()
+    rank = (rank or "").strip()
+    interview_date = (interview_date or "").strip()
+    who = f"{rank} {name}".strip() if rank else name
+    if who and interview_date:
+        return f"({who}, {interview_date})"
+    if who:
+        return f"({who})"
+    return f"(Interview, {interview_date})" if interview_date else "(Interview)"
+
+
+def update_interview_title(interview_id: int, title: str) -> None:
+    """Rename an interview in place. Used to keep an interview's title
+    synced to build_interview_title's format whenever the linked
+    person's name/rank/date changes."""
+    conn = get_connection()
+    try:
+        cur = _dict_cursor(conn)
+        cur.execute("UPDATE interviews SET title = %s WHERE id = %s", (title, interview_id))
+        conn.commit()
+    finally:
+        release_connection(conn)
+
+
 def get_person_for_interview(interview_id: int) -> dict | None:
     """Return the person linked to this interview (via
     interviews.person_id), or None if it has no metadata yet. Used by
@@ -718,27 +749,6 @@ def get_hypothesis_test_counts(tree: list[dict]) -> dict[int, dict]:
                     bucket[key] = bucket.get(key, 0) + 1
 
     return result
-
-
-def get_runs_testing_hypothesis(hypothesis_statement: str) -> list[dict]:
-    """Every run (across every interview) that tested this exact
-    hypothesis text — same matching rule as get_hypothesis_status_rollup
-    (exact, normalized — see _normalize_hypothesis_text). Each returned
-    run dict has interview_id/interview_title attached alongside its own
-    fields (including "output", where sharper_questions lives). Used by
-    Weekly Brief to let you pick which interview(s)' analyses to pull
-    test questions from for a given hypothesis."""
-    target = _normalize_hypothesis_text(hypothesis_statement)
-    matches = []
-    for interview in get_interviews():
-        for run in get_runs_for_interview(interview["id"]):
-            if target in {_normalize_hypothesis_text(h) for h in run["hypotheses"]}:
-                matches.append({
-                    **run,
-                    "interview_id": interview["id"],
-                    "interview_title": interview["title"],
-                })
-    return matches
 
 
 def get_all_topic_tags() -> list[str]:

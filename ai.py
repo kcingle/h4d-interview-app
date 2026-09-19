@@ -76,12 +76,24 @@ itself a failure, since DoD requirements interviews legitimately probe future ne
 
 
 def _build_system(documents: list[dict] | None, base_prompt: str = SYSTEM_PROMPT):
-    """Build the `system` request parameter. Returns `base_prompt`
-    unchanged when no TEXT-format documents are selected (Step 2/3/4
-    behavior). When there ARE text-format documents (Step 5), returns a
-    list of two text blocks instead: the untouched base prompt, plus a
-    separate, clearly-labeled reference-material block — the prompt
-    string itself is never edited.
+    """Build the `system` request parameter, always as a list of text
+    blocks with a cache breakpoint on the last one — this same
+    base_prompt + reference-document combination is resent, byte-
+    identical, on every call within one interview's clarifying/analysis
+    flow (start_adaptive_clarifying, continue_adaptive_clarifying x2,
+    run_step2_after_adaptive_clarifying all share it), and across
+    different interviews too whenever the same documents are selected
+    (the Mom Test is mandatory, so this is the common case) — caching it
+    avoids re-paying full input price for the same prompt+docs each time.
+    1-hour TTL, matching _corpus_system_blocks below: a person answering
+    clarifying questions one at a time routinely takes longer than the
+    5-minute ephemeral default between calls.
+
+    With no TEXT-format documents selected, returns just the base prompt
+    as its own cached block (Step 2/3/4 behavior — the prompt string
+    itself is never edited). With text documents (Step 5), returns two
+    blocks instead: the untouched base prompt, plus a separate, clearly-
+    labeled reference-material block, cached together.
 
     `base_prompt` defaults to the graded SYSTEM_PROMPT (every existing
     caller keeps doing exactly that); the adaptive clarifying functions
@@ -100,7 +112,11 @@ def _build_system(documents: list[dict] | None, base_prompt: str = SYSTEM_PROMPT
     """
     text_documents = [d for d in (documents or []) if d.get("content_format", "text") == "text"]
     if not text_documents:
-        return base_prompt
+        return [{
+            "type": "text",
+            "text": base_prompt,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }]
     sections = "\n\n".join(f"### {d['title']}\n{d['content']}" for d in text_documents)
     reference_block = (
         "REFERENCE MATERIAL — background context provided by the team, not "
@@ -109,41 +125,53 @@ def _build_system(documents: list[dict] | None, base_prompt: str = SYSTEM_PROMPT
     )
     return [
         {"type": "text", "text": base_prompt},
-        {"type": "text", "text": reference_block},
+        {
+            "type": "text",
+            "text": reference_block,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
     ]
 
 
 def _build_user_message_content(user_text: str, documents: list[dict] | None):
-    """Build the content of the FIRST user message. Returns the plain
-    `user_text` string unchanged when there are no PDF-format documents
-    to attach (the common case) or the accumulated reference documents
-    aren't yet uploaded (falsy content is skipped, never sent empty).
+    """Build the content of the FIRST user message, always as a list of
+    blocks with a cache breakpoint on the last one — this whole message
+    (notes, hypotheses, and any attached PDFs) is byte-identical across
+    every subsequent call in the same interview's clarifying/analysis
+    flow, since later calls replay it unchanged via `history` rather than
+    rebuilding it. Caching it means the Mom Test PDF (routinely hundreds
+    of KB) is paid for once per interview instead of on each of the 3-4
+    calls that follow. 1-hour TTL — see _build_system for why.
 
-    When there IS at least one uploaded PDF, returns a list instead: one
-    native `document` content block per PDF (Claude reads the actual
-    pages directly — no text extraction, no new dependency, just stdlib
-    base64), followed by a final text block with `user_text`. This only
-    needs to happen on the first message of the conversation — run_step2
-    replays this same history rather than re-attaching the PDF(s) again.
+    With no PDF-format documents to attach (the common case) — or the
+    accumulated reference documents aren't yet uploaded (falsy content is
+    skipped, never sent empty) — returns just the `user_text` block.
+
+    When there IS at least one uploaded PDF, returns one native
+    `document` content block per PDF first (Claude reads the actual pages
+    directly — no text extraction, no new dependency, just stdlib
+    base64), followed by the `user_text` block.
     """
     pdf_documents = [
         d for d in (documents or [])
         if d.get("content_format") == "pdf" and d.get("content")
     ]
-    if not pdf_documents:
-        return user_text
-
-    blocks = []
-    for d in pdf_documents:
-        blocks.append({
+    blocks = [
+        {
             "type": "document",
             "source": {
                 "type": "base64",
                 "media_type": "application/pdf",
                 "data": base64.standard_b64encode(d["content"]).decode("utf-8"),
             },
-        })
-    blocks.append({"type": "text", "text": user_text})
+        }
+        for d in pdf_documents
+    ]
+    blocks.append({
+        "type": "text",
+        "text": user_text,
+        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+    })
     return blocks
 
 
@@ -163,9 +191,9 @@ CLARIFYING_QUESTIONS_SCHEMA = {
             # No "maxItems" here — Claude's structured-output schema doesn't
             # support array size constraints (a live call with one returns a
             # 400: "For 'array' type, property 'maxItems' is not
-            # supported"). The "up to three" limit is already in
-            # SYSTEM_PROMPT's instructions; run_step1 below also truncates
-            # to 3 in code as a safety net, never padding if there are fewer.
+            # supported"). The exactly-three limit is enforced in code by
+            # the adaptive clarifying loop below (MAX_ADAPTIVE_QUESTIONS),
+            # never padding if the model ever returns fewer.
         }
     },
     "required": ["questions"],
@@ -231,9 +259,9 @@ ANALYSIS_SCHEMA = {
             "items": {"type": "string"},
             # No "minItems"/"maxItems" — same unsupported-keyword issue as
             # CLARIFYING_QUESTIONS_SCHEMA above. SYSTEM_PROMPT already asks
-            # for exactly three; run_step2 below truncates to 3 in code if
-            # the model ever returns more, and leaves it alone (never pads)
-            # if it returns fewer.
+            # for exactly three; run_step2_after_adaptive_clarifying below
+            # truncates to 3 in code if the model ever returns more, and
+            # leaves it alone (never pads) if it returns fewer.
         },
         "slack_writeup": {
             "type": "object",
@@ -287,11 +315,16 @@ def _call(
     system,
     schema: dict | None = None,
     max_tokens: int = 16000,
+    effort: str | None = None,
 ):
     """Shared call wrapper: same model plumbing, one error-handling chain
     for every call site. `schema` (optional) adds output_config for a
     structured-output call (the two-step analysis); omit it for a
-    free-form text call (chat).
+    free-form text call (chat). `effort` (optional, e.g. "low") caps
+    thinking depth for calls that don't need Sonnet's default effort —
+    used by the adaptive clarifying-question calls (simple asks, reviewed
+    by a human immediately) but never by the graded Step 2 analysis,
+    which stays at the model's default effort deliberately.
 
     `max_tokens` defaults to 16000, not a smaller number: the current
     model runs adaptive (extended) thinking by default with no opt-out
@@ -306,8 +339,13 @@ def _call(
     _extract_text for how that failure is now actually diagnosable.
     """
     kwargs = dict(model=config.MODEL_NAME, max_tokens=max_tokens, system=system, messages=messages)
+    output_config = {}
     if schema is not None:
-        kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    if effort is not None:
+        output_config["effort"] = effort
+    if output_config:
+        kwargs["output_config"] = output_config
     try:
         return client.messages.create(**kwargs)
     except anthropic.AuthenticationError:
@@ -368,123 +406,19 @@ def _extract_text(response) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public flow — Step 1 then Step 2
-# ---------------------------------------------------------------------------
-
-
-def run_step1(
-    hypotheses: list[str],
-    raw_notes: str,
-    api_key: str,
-    documents: list[dict] | None = None,
-    additional_notes: str = "",
-) -> dict:
-    """Step 1: ask up to three clarifying questions about the interview.
-
-    `hypotheses`: one or more hypotheses being tested this run — the
-    graded SYSTEM_PROMPT above already says "one or more hypotheses"; the
-    app just lists every one of them in the user message below (the
-    prompt text itself never changes based on how many there are).
-
-    `additional_notes` (optional): free-form context the interviewer typed
-    separately from the transcript — nonverbal communication, tone, the
-    setting, or anything else observed but not written as dialogue. Appended
-    to the user message as its own clearly-labeled section (never merged
-    into `raw_notes` itself, so the interview's stored transcript stays
-    exactly what was actually said).
-
-    `documents` (Step 5, optional): reference documents to include as
-    context — each a dict with at least "title", "content", and
-    "content_format" ("text" or "pdf"). Text documents join the system
-    prompt as reference material; PDF documents attach natively to this
-    first user message instead (see _build_user_message_content).
-
-    Returns {"questions": [...], "history": [user_msg, assistant_msg]}.
-    `history` is the two-message exchange to replay into run_step2 so the
-    conversation stays intact across both steps.
-    """
-    client = _client(api_key)
-    hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
-    user_text = (
-        f"Hypotheses being tested:\n{hypotheses_block}\n\n"
-        f"Raw interview notes:\n{raw_notes}"
-    )
-    if additional_notes and additional_notes.strip():
-        user_text += (
-            "\n\nAdditional notes from the interviewer (not part of the "
-            "transcript — e.g. nonverbal communication, tone, body language, "
-            "the setting, or other context observed during the interview):\n"
-            f"{additional_notes.strip()}"
-        )
-    user_content = _build_user_message_content(user_text, documents)
-    response = _call(
-        client,
-        messages=[{"role": "user", "content": user_content}],
-        schema=CLARIFYING_QUESTIONS_SCHEMA,
-        system=_build_system(documents),
-    )
-    data = _extract_json(response)
-    assistant_text = next(b.text for b in response.content if b.type == "text")
-
-    # Enforce "up to three" in code — the schema itself can't (see
-    # CLARIFYING_QUESTIONS_SCHEMA above). Truncate only; never pad if the
-    # model returns fewer than three.
-    questions = list(data.get("questions", []))[:3]
-
-    return {
-        "questions": questions,
-        "history": [
-            {"role": "user", "content": user_content},
-            {"role": "assistant", "content": assistant_text},
-        ],
-    }
-
-
-def run_step2(
-    history: list[dict],
-    questions: list[str],
-    answers: list[str],
-    api_key: str,
-    documents: list[dict] | None = None,
-) -> dict:
-    """Step 2: produce the full analysis, given answers to the Step 1
-    clarifying questions. `history` must be the two-message exchange
-    returned by run_step1 for this same interview. `documents` (Step 5,
-    optional) should be the SAME set passed to run_step1, so the model
-    sees consistent reference material across both calls."""
-    client = _client(api_key)
-
-    if questions:
-        answer_lines = "\n".join(
-            f"{i + 1}. Q: {q}\n   A: {a.strip() or '(no answer given)'}"
-            for i, (q, a) in enumerate(zip(questions, answers))
-        )
-        followup = f"Here are the answers to your clarifying questions:\n{answer_lines}"
-    else:
-        followup = "No clarifying questions were needed. Please proceed with the full analysis."
-
-    messages = history + [{"role": "user", "content": followup}]
-    response = _call(
-        client, messages=messages, schema=ANALYSIS_SCHEMA, system=_build_system(documents)
-    )
-    data = _extract_json(response)
-
-    # Enforce "exactly three" sharper questions in code — the schema
-    # itself can't (see ANALYSIS_SCHEMA above). Truncate only; never pad
-    # with invented questions if the model returns fewer than three.
-    data["sharper_questions"] = list(data.get("sharper_questions", []))[:3]
-
-    return data
-
-
-# ---------------------------------------------------------------------------
-# Adaptive clarifying — a genuinely turn-by-turn Flipped Interaction, used
-# by Process Interview's primary new-interview flow (not the Interviews
-# page's "Rerun this interview", which still uses run_step1/run_step2
-# above, unchanged). run_step1 above asks up to three questions in a
-# single batch, all answered at once — real Flipped Interaction is
-# adaptive: one question, your answer, then the NEXT question is informed
-# by that specific answer, not decided in advance.
+# Adaptive clarifying — a genuinely turn-by-turn Flipped Interaction: one
+# question, your answer, then the NEXT question is informed by that
+# specific answer, not decided in advance. This is Process Interview's
+# only clarifying-questions flow (an earlier batch-of-three-at-once
+# version, and a "rerun this interview" feature that reused it, have both
+# been removed — starting a new interview here is the one path now).
+#
+# This always asks exactly MAX_ADAPTIVE_QUESTIONS questions (no early
+# stop) — an earlier version let the model decide after each answer
+# whether it needed another, but in practice it almost always declared
+# itself satisfied after just one, which read as broken/inconsistent
+# against the "Question X of 3" UI. Always asking all three is simpler
+# and matches what the UI promises.
 #
 # IMPORTANT: this uses its OWN system prompt below, entirely separate from
 # the graded SYSTEM_PROMPT — that constant is never read, referenced, or
@@ -499,20 +433,31 @@ analyze a DoD customer-discovery interview, before any analysis begins. You are 
 one or more hypotheses being tested and the raw notes from a single beneficiary
 interview.
 
-Ask ONE focused question at a time about what the notes do NOT capture, regarding
-(a) the interviewee's nonverbal communication relative to the hypotheses, (b)
-implied-but-not-stated actions on the team's or interviewee's part, and (c) implied
-implications when the interviewee's answers are viewed collectively.
+You will ask exactly THREE questions, one at a time, about what the notes do NOT
+capture, regarding (a) the interviewee's nonverbal communication relative to the
+hypotheses, (b) implied-but-not-stated actions on the team's or interviewee's part,
+and (c) implied implications when the interviewee's answers are viewed collectively.
 
-After each answer, decide whether it reveals a real gap worth probing further in the
-same vein: if so, ask exactly one more question that builds on that specific answer;
-if not — or once three questions have been asked in total — stop and signal you are
-ready by returning an empty question list instead.
+Each question must be freshly grounded in the notes — and, from the second question
+onward, in the answer just given — never generic and never repeated. Always return
+exactly one question in the list; do not return an empty list until you are explicitly
+told all three have been asked.
 
-Output only the next question (or an empty list, if you are ready to proceed) —
-never produce any analysis here."""
+Output only the next question — never produce any analysis here."""
 
 MAX_ADAPTIVE_QUESTIONS = 3
+
+# Used only if the model ever returns no question for a round that hasn't
+# hit the cap yet (should be rare given the prompt above, but the UI
+# promises exactly 3 questions, so a round must never silently vanish).
+_FALLBACK_ADAPTIVE_QUESTIONS = [
+    "What did you notice about the interviewee's tone, hesitation, or body "
+    "language during this conversation that the notes don't capture?",
+    "Is there anything the interviewee implied they (or your team) would do, "
+    "without stating it as an action already being taken?",
+    "Looking at their answers together rather than one at a time, what's an "
+    "implication for the hypotheses that none of them stated directly?",
+]
 
 
 def start_adaptive_clarifying(
@@ -522,12 +467,15 @@ def start_adaptive_clarifying(
     documents: list[dict] | None = None,
     additional_notes: str = "",
 ) -> dict:
-    """Round 1 of the adaptive clarifying loop: ask for the first
-    question (or none, if the model decides it needs nothing at all for
-    this interview). Same user-message shape as run_step1, just under
-    _ADAPTIVE_CLARIFYING_SYSTEM_PROMPT instead of SYSTEM_PROMPT.
+    """Round 1 of the fixed 3-question clarifying loop: ask for the
+    first question, under _ADAPTIVE_CLARIFYING_SYSTEM_PROMPT.
 
-    Returns {"question": str | None, "round": 1, "history": [...]}.
+    Always returns a real question (falls back to
+    _FALLBACK_ADAPTIVE_QUESTIONS[0] if the model ever returns none) —
+    the UI promises exactly MAX_ADAPTIVE_QUESTIONS questions, so round 1
+    must never come back empty.
+
+    Returns {"question": str, "round": 1, "history": [...]}.
     """
     client = _client(api_key)
     hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
@@ -548,13 +496,17 @@ def start_adaptive_clarifying(
         messages=[{"role": "user", "content": user_content}],
         schema=CLARIFYING_QUESTIONS_SCHEMA,
         system=_build_system(documents, base_prompt=_ADAPTIVE_CLARIFYING_SYSTEM_PROMPT),
+        # Asking one focused question is a simple task, and you review it
+        # immediately before answering — low effort keeps cost down here
+        # without risking the graded analysis, which never sets this.
+        effort="low",
     )
     data = _extract_json(response)
     assistant_text = next(b.text for b in response.content if b.type == "text")
     questions = list(data.get("questions", []))[:1]
 
     return {
-        "question": questions[0] if questions else None,
+        "question": questions[0] if questions else _FALLBACK_ADAPTIVE_QUESTIONS[0],
         "round": 1,
         "history": [
             {"role": "user", "content": user_content},
@@ -571,13 +523,15 @@ def continue_adaptive_clarifying(
     api_key: str,
     documents: list[dict] | None = None,
 ) -> dict:
-    """Answer the previous question, then ask whether the model wants
-    exactly one more (grounded in that specific answer) or is ready to
-    move on. `round_num` is how many questions have been asked so far
-    (including the one just answered) — capped at MAX_ADAPTIVE_QUESTIONS
-    here as a safety net even though the prompt already asks for that cap
-    itself, the same belt-and-suspenders pattern run_step1/run_step2 use
-    for their own "up to three" limits.
+    """Answer the previous question, then ask for the next one in the
+    fixed 3-question sequence, grounded in that specific answer.
+    `round_num` is how many questions have been asked so far (including
+    the one just answered) — once it reaches MAX_ADAPTIVE_QUESTIONS, the
+    loop ends here without another model call.
+
+    Always returns a real question for any round below the cap (falls
+    back to _FALLBACK_ADAPTIVE_QUESTIONS[round_num] if the model ever
+    returns none) — a round must never silently vanish.
 
     Returns {"question": str | None, "round": int, "history": [...]}.
     """
@@ -585,25 +539,30 @@ def continue_adaptive_clarifying(
         return {"question": None, "round": round_num, "history": history}
 
     client = _client(api_key)
+    next_round = round_num + 1
     followup_text = (
         f"Q: {question}\nA: {answer.strip() or '(no answer given)'}\n\n"
-        "Do you need to ask exactly one more question in the same vein, "
-        "grounded in that answer? If not — or if three questions have now "
-        "been asked in total — return an empty question list instead."
+        f"Now ask question {next_round} of {MAX_ADAPTIVE_QUESTIONS}, grounded "
+        "in that answer and building on the same vein. Return exactly one "
+        "question."
     )
     messages = history + [{"role": "user", "content": followup_text}]
     response = _call(
         client, messages=messages, schema=CLARIFYING_QUESTIONS_SCHEMA,
         system=_build_system(documents, base_prompt=_ADAPTIVE_CLARIFYING_SYSTEM_PROMPT),
+        # Must match start_adaptive_clarifying's effort exactly — changing
+        # effort between calls invalidates the prompt cache set up there.
+        effort="low",
     )
     data = _extract_json(response)
     assistant_text = next(b.text for b in response.content if b.type == "text")
     questions = list(data.get("questions", []))[:1]
     new_history = messages + [{"role": "assistant", "content": assistant_text}]
+    fallback = _FALLBACK_ADAPTIVE_QUESTIONS[round_num]
 
     return {
-        "question": questions[0] if questions else None,
-        "round": round_num + 1,
+        "question": questions[0] if questions else fallback,
+        "round": next_round,
         "history": new_history,
     }
 
@@ -612,12 +571,11 @@ def run_step2_after_adaptive_clarifying(
     history: list[dict], api_key: str, documents: list[dict] | None = None
 ) -> dict:
     """Step 2, following the adaptive clarifying loop above — runs under
-    the EXACT ORIGINAL, unmodified SYSTEM_PROMPT and ANALYSIS_SCHEMA, same
-    as run_step2. Only the history feeding it differs: it already
-    contains the full one-at-a-time Q&A exchange (each answer was already
-    shown to the model inline, one round at a time), so — unlike
-    run_step2 — no separate "here are the answers" recap message is
-    needed, just a short instruction to proceed."""
+    the EXACT ORIGINAL, unmodified SYSTEM_PROMPT and ANALYSIS_SCHEMA. The
+    history already contains the full one-at-a-time Q&A exchange (each
+    answer was already shown to the model inline, one round at a time),
+    so no separate "here are the answers" recap message is needed, just
+    a short instruction to proceed."""
     client = _client(api_key)
     messages = history + [
         {"role": "user", "content": "Please proceed with the full analysis (Step 2)."}
@@ -693,7 +651,7 @@ def suggest_metadata(raw_notes: str, api_key: str) -> dict:
     try:
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
-            model=config.MODEL_NAME,
+            model=config.MODEL_NAME_SMALL,
             max_tokens=1024,
             system=_METADATA_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": f"Interview notes:\n{raw_notes}"}],
@@ -763,7 +721,7 @@ def _suggest_topics(hypotheses: list[str], analysis: dict, api_key: str) -> list
 
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
-            model=config.MODEL_NAME,
+            model=config.MODEL_NAME_SMALL,
             max_tokens=256,
             system=_TOPIC_TAGS_SYSTEM_PROMPT,
             messages=[
@@ -833,7 +791,7 @@ def build_digest(
     and never leaving other fields incomplete because of it.
 
     `hypotheses`: every hypothesis tested this run (one or more), in the
-    SAME order they were sent to run_step1/run_step2. Paired POSITIONALLY
+    SAME order they were sent to the clarifying/analysis calls. Paired POSITIONALLY
     with analysis["hypothesis_ledger"] (the model is asked for "one row
     per hypothesis tested," in the same order) — each digest entry then
     carries the exact tested string in its "hypothesis" field (not just
@@ -849,7 +807,7 @@ def build_digest(
     confirmed to refresh the digest's interviewee field.
 
     `additional_notes` (optional): the same interviewer-supplied context
-    passed to run_step1 (see there). Included alongside raw_notes as
+    passed to start_adaptive_clarifying (see there). Included alongside raw_notes as
     source text for the verbatim-quote check below — a quote the model
     pulls from these notes (not just the transcript) is real, interviewer-
     written text, not a fabrication, so it still counts as verified.
