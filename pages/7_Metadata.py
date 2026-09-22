@@ -84,11 +84,8 @@ if st.button("Save changes", type="primary"):
         # Keep every linked interview's title in sync with the standard
         # "(rank name, date)" format — a correction here shouldn't leave
         # a stale title behind on its interview(s).
-        new_title = storage.build_interview_title(
-            after["Name"], after["Rank"], after["Interview date"]
-        )
         for linked_interview in person["interviews"]:
-            storage.update_interview_title(linked_interview["id"], new_title)
+            storage.sync_interview_title(linked_interview["id"])
 
     if changed:
         st.success(f"Saved {changed} change{'s' if changed != 1 else ''}.")

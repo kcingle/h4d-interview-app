@@ -12,7 +12,9 @@ a new interview on Process Interview instead.
 
 import streamlit as st
 
+import ai
 import auth
+import env_store
 import storage
 from render import build_export_header, render_analysis
 
@@ -20,6 +22,39 @@ st.set_page_config(page_title="H4D Interview App — Interviews", page_icon="�
 auth.require_login()
 
 st.title("Interviews")
+
+# An interview is titled after whoever it interviewed, automatically (see
+# storage.build_interview_title). Repair anything that predates that rule,
+# or drifted since, once per session and before the dropdown is built — so
+# this list can never show a nameless "Interview — <date>" and nobody has
+# to rename one by hand.
+if not st.session_state.get("interview_titles_synced"):
+    renamed, unnamed = storage.backfill_interview_titles()
+    api_key = env_store.load_api_key()
+    for interview in unnamed:
+        # No interviewee row to read a name off (metadata was skipped, or
+        # the interview predates metadata), so read the name back out of
+        # the transcript with the same suggestion the processing flow
+        # uses. A blank result — no API key, or the call failed, both of
+        # which suggest_metadata returns rather than raises — leaves the
+        # existing title alone instead of replacing it with an equally
+        # nameless one.
+        suggestion = ai.suggest_metadata(interview["raw_text"], api_key)
+        if not suggestion["name_or_label"].strip():
+            continue
+        new_title = storage.build_interview_title(
+            suggestion["name_or_label"],
+            suggestion["rank"],
+            # Interviews are processed the day they happen, and an
+            # interview with no metadata has no recorded interview date —
+            # the day it was saved is the only date on record.
+            interview["created_at"][:10],
+        )
+        storage.update_interview_title(interview["id"], new_title)
+        renamed.append((interview["id"], interview["title"], new_title))
+    st.session_state["interview_titles_synced"] = True
+    for _id, was, now in renamed:
+        st.info(f"Renamed to match its interviewee: “{was}” → “{now}”")
 
 interviews = storage.get_interviews()
 

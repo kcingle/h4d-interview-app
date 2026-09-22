@@ -346,6 +346,52 @@ def update_interview_title(interview_id: int, title: str) -> None:
         release_connection(conn)
 
 
+def sync_interview_title(interview_id: int) -> str | None:
+    """Re-derive one interview's title from its linked interviewee and
+    save it if it has drifted. Returns the title the interview now
+    carries, or None when no interviewee is linked yet (nothing to derive
+    a name from). This is the single place the "an interview is titled
+    after whoever it interviewed" rule is applied to the database, so no
+    caller has to remember the build_interview_title/update_interview_title
+    pair — or can forget to run it."""
+    person = get_person_for_interview(interview_id)
+    if not person:
+        return None
+    title = build_interview_title(
+        person["name"], person["rank"], person["interview_date"]
+    )
+    interview = get_interview(interview_id)
+    if interview and interview["title"] != title:
+        update_interview_title(interview_id, title)
+    return title
+
+
+def backfill_interview_titles() -> tuple[list[tuple[int, str, str]], list[dict]]:
+    """Bring every stored interview's title into the standard
+    "(rank name, date)" format, and report what couldn't be brought in.
+
+    Returns (renamed, unnamed): `renamed` is one (id, old_title,
+    new_title) per interview this actually corrected, and `unnamed` is
+    every interview with no interviewee linked — there is no name in the
+    database to title those after, so the caller decides where one comes
+    from (Interviews reads it back out of the transcript).
+
+    This exists for the two ways an interview could end up without its
+    interviewee's name on it: it was processed before titling became
+    automatic, or its metadata was skipped at processing time. Running it
+    on load means neither state can persist unnoticed."""
+    renamed: list[tuple[int, str, str]] = []
+    unnamed: list[dict] = []
+    for interview in get_interviews():
+        before = interview["title"]
+        after = sync_interview_title(interview["id"])
+        if after is None:
+            unnamed.append(interview)
+        elif after != before:
+            renamed.append((interview["id"], before, after))
+    return renamed, unnamed
+
+
 def get_person_for_interview(interview_id: int) -> dict | None:
     """Return the person linked to this interview (via
     interviews.person_id), or None if it has no metadata yet. Used by
@@ -1152,7 +1198,10 @@ def update_person(
 
 
 def set_interview_person(interview_id: int, person_id: int) -> None:
-    """Link an interview to a person (sets interviews.person_id)."""
+    """Link an interview to a person (sets interviews.person_id), then
+    title the interview after them. The title is part of what linking an
+    interviewee *means* here, so it happens in the same call rather than
+    being left to each caller to remember."""
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -1162,6 +1211,7 @@ def set_interview_person(interview_id: int, person_id: int) -> None:
         conn.commit()
     finally:
         release_connection(conn)
+    sync_interview_title(interview_id)
 
 
 def delete_person(person_id: int) -> None:

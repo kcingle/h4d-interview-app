@@ -84,9 +84,6 @@ for doc in toggleable_documents:
     if include:
         selected_documents.append(doc)
 
-default_title = f"Interview — {datetime.date.today().isoformat()}"
-interview_title = st.text_input("Interview title", value=default_title, key="interview_title")
-
 raw_notes = st.text_area(
     "Raw interview notes",
     height=300,
@@ -152,7 +149,20 @@ def _finish_analysis_and_save():
         selected_hypotheses, analysis, raw_notes, api_key,
         person=None, additional_notes=additional_notes,
     )
-    title = interview_title.strip() or default_title
+    # Identify the interviewee BEFORE the interview row is created, so it
+    # is saved under their name on the very first write — there is never a
+    # moment where a provisional, nameless title exists to be left behind
+    # if the confirmation step below is skipped. This is the same single
+    # Haiku call the metadata form used to make on arrival, just moved
+    # earlier; it's stashed below so that form reuses it rather than
+    # paying for it twice, and it never raises (blank dict on failure).
+    with st.spinner("Identifying the interviewee..."):
+        suggestion = ai.suggest_metadata(raw_notes, api_key)
+    title = storage.build_interview_title(
+        suggestion["name_or_label"],
+        suggestion["rank"],
+        datetime.date.today().isoformat(),
+    )
     interview_id = storage.save_interview(title, raw_notes, notes=additional_notes)
     document_ids = [d["id"] for d in docs_for_step2]
     answered = st.session_state.get("adaptive_answered", [])
@@ -192,6 +202,8 @@ def _finish_analysis_and_save():
     st.session_state["pending_metadata_notes"] = additional_notes
     st.session_state["pending_metadata_hypotheses"] = selected_hypotheses
     st.session_state["pending_metadata_analysis"] = analysis
+    st.session_state["metadata_suggestion"] = suggestion
+    st.session_state["metadata_suggestion_for"] = interview_id
     for key in (
         "pending_media", "pending_media_caption", "adaptive_history",
         "adaptive_current_question", "adaptive_round", "adaptive_answered",
@@ -392,13 +404,10 @@ if st.session_state.flow_stage == "metadata":
                 m_interviewer_4, m_interviewer_5,
             ],
         )
+        # Linking the person retitles the interview to the standard
+        # "(rank name, date)" format off the metadata just confirmed —
+        # picking up any correction made to the suggested name above.
         storage.set_interview_person(meta_interview_id, person_id)
-
-        # Rename this interview to the standard "(rank name, date)" format
-        # now that the interviewee is known — replaces the provisional
-        # title typed above before metadata existed.
-        new_title = storage.build_interview_title(m_name, m_rank, m_date.isoformat())
-        storage.update_interview_title(meta_interview_id, new_title)
 
         # Refresh this run's digest now that the interviewee is known.
         person = storage.get_person(person_id)
@@ -418,6 +427,13 @@ if st.session_state.flow_stage == "metadata":
         _go_to_interviews(meta_interview_id)
 
     if metadata_skipped:
+        # Skipping saves no person, but the title still follows whatever
+        # name is in the form — a correction to the suggested name
+        # shouldn't be thrown away just because the rest was skipped.
+        storage.update_interview_title(
+            meta_interview_id,
+            storage.build_interview_title(m_name, m_rank, m_date.isoformat()),
+        )
         for key in (
             "pending_metadata_interview_id", "pending_metadata_run_id",
             "pending_metadata_raw_text", "pending_metadata_notes",

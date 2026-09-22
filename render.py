@@ -11,7 +11,11 @@ immediately after saving a run rather than rendering results itself —
 see that file's docstring — so it no longer uses this module for that.)
 """
 
+import re
+
 import streamlit as st
+
+from docx_export import build_docx_report
 
 
 def _flatten_hypothesis_tree(nodes: list[dict], depth: int = 0) -> list[tuple[dict, int]]:
@@ -52,6 +56,14 @@ def render_hypothesis_picker(tree: list[dict], key_prefix: str) -> list[str]:
         if checked:
             selected.append(node["text"])
     return selected
+
+
+def _docx_filename(header: dict | None) -> str:
+    """A safe .docx filename from the interview title, e.g.
+    "(MAJ Qazi, 2026-09-17)" -> "MAJ Qazi 2026-09-17 - Interview Analysis.docx"."""
+    title = ((header or {}).get("interview_title") or "").strip("() ")
+    title = re.sub(r'[\/:*?"<>|,]+', "", title).strip()
+    return f"{title} - Interview Analysis.docx" if title else "Interview Analysis.docx"
 
 
 def _md_cell(text: str) -> str:
@@ -285,23 +297,14 @@ def render_analysis(
     # whenever a run was actually expanded, until this fix.
     st.caption("📋 Copy report — hover the block below and click the copy icon in its corner.")
     st.code(markdown_report, language="markdown")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.download_button(
-            "Download .md",
-            data=markdown_report,
-            file_name="interview_analysis.md",
-            mime="text/markdown",
-            key=f"{key_prefix}download_md",
-        )
-    with col2:
-        # Same content as the Markdown export — plain-text readable as-is
-        # (headers, tables, and lists are all still legible), so this is a
-        # second export format at zero extra cost, no new dependency.
-        st.download_button(
-            "Download .txt",
-            data=markdown_report,
-            file_name="interview_analysis.txt",
-            mime="text/plain",
-            key=f"{key_prefix}download_txt",
-        )
+    # Word is the one download: a formatted document that mirrors the
+    # tables and boxes shown above (see docx_export.py). The copy block
+    # above stays for pasting the plain-text version into Slack/email.
+    st.download_button(
+        "Download as Word document",
+        data=build_docx_report(result, hypothesis, header=export_header),
+        file_name=_docx_filename(export_header),
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        key=f"{key_prefix}download_docx",
+        type="primary",
+    )
