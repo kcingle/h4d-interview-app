@@ -102,6 +102,19 @@ additional_notes = st.text_area(
     ),
 )
 
+skip_clarifying = st.checkbox(
+    "Full transcript already captured — skip clarifying questions",
+    key="skip_clarifying",
+    help=(
+        "For a complete transcript you already have in hand (e.g. from a "
+        "recording, or analysis run elsewhere) — not typed-up notes with "
+        "gaps in them. Goes straight to the full analysis with no "
+        "clarifying Q&A, and this run is flagged everywhere it's shown "
+        "as having skipped that step, since nobody was asked anything "
+        "about the interview to fill in what the raw text doesn't say."
+    ),
+)
+
 st.subheader("Photos, videos & other media (optional)")
 _media_max_mb = storage.VISUAL_RESOURCE_MAX_BYTES / (1024 * 1024)
 st.caption(
@@ -128,19 +141,19 @@ if "flow_stage" not in st.session_state:
     st.session_state.flow_stage = "idle"
 
 
-def _finish_analysis_and_save():
-    """Step 2 onward: run the full analysis under the graded, unmodified
-    SYSTEM_PROMPT, save the interview + run + any media, then move into
-    the metadata-confirmation stage below (still on this page — that's
-    still "processing this interview in the moment"). Shared by both
-    paths that can reach "no more clarifying questions" — the model
-    needing nothing at all on round 1, and the adaptive loop below
-    finishing naturally."""
+def _finish_analysis_and_save(analysis: dict, clarifying_skipped: bool = False):
+    """Step 2 onward, given an already-computed Step 2 `analysis` (under
+    the graded, unmodified SYSTEM_PROMPT): save the interview + run + any
+    media, then move into the metadata-confirmation stage below (still on
+    this page — that's still "processing this interview in the moment").
+    Shared by every path that can reach "no more clarifying questions to
+    ask" — the model needing nothing at all on round 1, the adaptive loop
+    below finishing naturally, and the "full transcript" toggle that
+    skips the clarifying loop entirely. `clarifying_skipped` records only
+    the last of those — the toggle — so a run this page can display or
+    export distinguishes "asked, model needed nothing" from "never
+    asked"."""
     docs_for_step2 = st.session_state.get("selected_documents", [])
-    with st.spinner("Running the full analysis..."):
-        analysis = ai.run_step2_after_adaptive_clarifying(
-            st.session_state.adaptive_history, api_key, documents=docs_for_step2,
-        )
     # Step 3: persist immediately. This always creates a NEW interview +
     # its first run. `person=None` here — interviewee metadata isn't
     # confirmed yet; that happens in the metadata stage right below,
@@ -174,6 +187,7 @@ def _finish_analysis_and_save():
         analysis,
         digest,
         document_ids=document_ids,
+        clarifying_skipped=clarifying_skipped,
     )
 
     # Save any uploaded media against this interview. A file over the
@@ -256,24 +270,44 @@ if start_clicked:
     st.session_state.pending_media_caption = media_caption.strip()
     st.session_state.adaptive_answered = []
     try:
-        with st.spinner("Asking a clarifying question..."):
-            step1 = ai.start_adaptive_clarifying(
-                selected_hypotheses,
-                raw_notes,
-                api_key,
-                documents=selected_documents,
-                additional_notes=additional_notes,
-            )
-        st.session_state.adaptive_history = step1["history"]
-        if step1["question"]:
-            st.session_state.adaptive_current_question = step1["question"]
-            st.session_state.adaptive_round = step1["round"]
-            st.session_state.flow_stage = "clarifying"
+        if skip_clarifying:
+            # "Full transcript already captured" — go straight to Step 2
+            # from the transcript, with no clarifying round trip at all
+            # (see ai.run_step2_from_transcript). flow_stage never enters
+            # "clarifying" on this path.
+            with st.spinner("Running the full analysis..."):
+                analysis = ai.run_step2_from_transcript(
+                    selected_hypotheses,
+                    raw_notes,
+                    api_key,
+                    documents=selected_documents,
+                    additional_notes=additional_notes,
+                )
+            _finish_analysis_and_save(analysis, clarifying_skipped=True)
         else:
-            # The model decided it needs nothing at all for this
-            # interview — go straight to the full analysis rather than
-            # showing an empty clarifying step with nothing to answer.
-            _finish_analysis_and_save()
+            with st.spinner("Asking a clarifying question..."):
+                step1 = ai.start_adaptive_clarifying(
+                    selected_hypotheses,
+                    raw_notes,
+                    api_key,
+                    documents=selected_documents,
+                    additional_notes=additional_notes,
+                )
+            st.session_state.adaptive_history = step1["history"]
+            if step1["question"]:
+                st.session_state.adaptive_current_question = step1["question"]
+                st.session_state.adaptive_round = step1["round"]
+                st.session_state.flow_stage = "clarifying"
+            else:
+                # The model decided it needs nothing at all for this
+                # interview — go straight to the full analysis rather than
+                # showing an empty clarifying step with nothing to answer.
+                with st.spinner("Running the full analysis..."):
+                    analysis = ai.run_step2_after_adaptive_clarifying(
+                        st.session_state.adaptive_history, api_key,
+                        documents=selected_documents,
+                    )
+                _finish_analysis_and_save(analysis)
     except ai.AIError as e:
         st.error(str(e))
 
@@ -317,7 +351,13 @@ if st.session_state.flow_stage == "clarifying":
                 st.session_state.adaptive_round = nxt["round"]
                 st.rerun()
             else:
-                _finish_analysis_and_save()
+                docs_for_step2 = st.session_state.get("selected_documents", [])
+                with st.spinner("Running the full analysis..."):
+                    analysis = ai.run_step2_after_adaptive_clarifying(
+                        st.session_state.adaptive_history, api_key,
+                        documents=docs_for_step2,
+                    )
+                _finish_analysis_and_save(analysis)
         except ai.AIError as e:
             st.error(str(e))
 

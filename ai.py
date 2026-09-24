@@ -588,6 +588,40 @@ def run_step2_after_adaptive_clarifying(
     return data
 
 
+def run_step2_from_transcript(
+    hypotheses: list[str],
+    raw_notes: str,
+    api_key: str,
+    documents: list[dict] | None = None,
+    additional_notes: str = "",
+) -> dict:
+    """Step 2 straight from a full transcript, with no clarifying-question
+    round trip at all — for notes someone says are already a complete
+    transcript, where the flipped-interaction loop above would just be
+    probing gaps that aren't there. Runs under the exact same, unmodified
+    SYSTEM_PROMPT and ANALYSIS_SCHEMA as run_step2_after_adaptive_clarifying;
+    the only difference is the history handed to it is a single user
+    message (the same one start_adaptive_clarifying's round 1 would have
+    built) with no assistant Q&A appended — so this also costs strictly
+    less than the normal flow, not the same: none of the 3 clarifying
+    calls happen."""
+    hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
+    user_text = (
+        f"Hypotheses being tested:\n{hypotheses_block}\n\n"
+        f"Raw interview notes:\n{raw_notes}"
+    )
+    if additional_notes and additional_notes.strip():
+        user_text += (
+            "\n\nAdditional notes from the interviewer (not part of the "
+            "transcript — e.g. nonverbal communication, tone, body language, "
+            "the setting, or other context observed during the interview):\n"
+            f"{additional_notes.strip()}"
+        )
+    user_content = _build_user_message_content(user_text, documents)
+    history = [{"role": "user", "content": user_content}]
+    return run_step2_after_adaptive_clarifying(history, api_key, documents=documents)
+
+
 # ---------------------------------------------------------------------------
 # Interviewee metadata suggestion — Step 6. A small, SEPARATE call, not
 # part of the two-step flow above, and does not touch SYSTEM_PROMPT or any

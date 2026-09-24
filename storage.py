@@ -186,6 +186,7 @@ def init_db() -> None:
                 output_json TEXT,
                 digest_json TEXT,
                 document_ids_json TEXT,
+                clarifying_skipped INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -220,6 +221,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
             """
+        )
+        # The one schema change since the cloud migration (see the
+        # docstring above): runs.clarifying_skipped didn't exist when the
+        # live table was created, so CREATE TABLE IF NOT EXISTS above is a
+        # no-op for it there. ADD COLUMN IF NOT EXISTS is the idempotent,
+        # Postgres-native way to bring an already-populated table forward
+        # without a separate migration script — existing rows get the
+        # column's default (0 = a normal run, clarifying questions asked).
+        cur.execute(
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS "
+            "clarifying_skipped INTEGER NOT NULL DEFAULT 0"
         )
         conn.commit()
         _seed_mom_test_document_if_missing(conn)
@@ -943,6 +955,7 @@ def save_run(
     output: dict,
     digest: dict,
     document_ids: list[int] | None = None,
+    clarifying_skipped: bool = False,
 ) -> int:
     """Save one processing run for an interview and return its new row id.
 
@@ -956,6 +969,11 @@ def save_run(
     works unchanged for a multi-hypothesis run. `document_ids` records
     which reference documents were included as context for this run —
     provenance for defending which context produced a given analysis.
+    `clarifying_skipped` records whether this run came from the "Already
+    a full transcript" toggle on Process Interview — no clarifying Q&A
+    was asked (`questions`/`answers` are empty for that reason, not
+    because the model decided it needed nothing), so nobody reviewing
+    this run later mistakes a bypassed step for a clean one.
     """
     conn = get_connection()
     try:
@@ -963,8 +981,9 @@ def save_run(
         cur.execute(
             "INSERT INTO runs "
             "(interview_id, hypothesis_text, hypotheses_json, questions_json, "
-            "answers_json, output_json, digest_json, document_ids_json, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "answers_json, output_json, digest_json, document_ids_json, "
+            "clarifying_skipped, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 interview_id,
                 "; ".join(hypotheses),
@@ -974,6 +993,7 @@ def save_run(
                 json.dumps(output),
                 json.dumps(digest),
                 json.dumps(document_ids or []),
+                int(bool(clarifying_skipped)),
                 _now(),
             ),
         )
@@ -998,7 +1018,8 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
         cur = _dict_cursor(conn)
         cur.execute(
             "SELECT id, interview_id, hypothesis_text, hypotheses_json, questions_json, "
-            "answers_json, output_json, digest_json, document_ids_json, created_at "
+            "answers_json, output_json, digest_json, document_ids_json, "
+            "clarifying_skipped, created_at "
             "FROM runs WHERE interview_id = %s ORDER BY created_at ASC",
             (interview_id,),
         )
@@ -1013,6 +1034,7 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
             d["output"] = json.loads(d.pop("output_json") or "{}")
             d["digest"] = json.loads(d.pop("digest_json") or "{}")
             d["document_ids"] = json.loads(d.pop("document_ids_json") or "[]")
+            d["clarifying_skipped"] = bool(d["clarifying_skipped"])
             runs.append(d)
         return runs
     finally:

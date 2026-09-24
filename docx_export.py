@@ -257,6 +257,21 @@ def build_docx_report(result: dict, hypothesis: str, header: dict | None = None)
             _margins(cell, 80, 80, 140, 140)
         _cell_text(a, label, bold=True, size=9.5, color=NAVY)
         _cell_text(b, value, size=10)
+    if header.get("clarifying_skipped"):
+        row = _add_row(t, [label_w, PAGE_W - label_w])
+        _no_split(row)
+        a, b = row.cells
+        for cell in (a, b):
+            _shade(cell, AMBER_BG)
+            _borders(cell)
+            _margins(cell, 80, 80, 140, 140)
+        _cell_text(a, "⚠ Clarifying questions", bold=True, size=9.5, color=AMBER_BAR)
+        _cell_text(
+            b,
+            "Skipped — submitted as an already-complete transcript; nobody "
+            "was asked follow-up questions about this interview.",
+            bold=True, size=10, color="7A5A00",
+        )
     _spacer(doc, 12)
 
     # 1. Mom Test audit
