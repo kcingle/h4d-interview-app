@@ -257,7 +257,23 @@ def build_docx_report(result: dict, hypothesis: str, header: dict | None = None)
             _margins(cell, 80, 80, 140, 140)
         _cell_text(a, label, bold=True, size=9.5, color=NAVY)
         _cell_text(b, value, size=10)
-    if header.get("clarifying_skipped"):
+    if header.get("imported_result"):
+        row = _add_row(t, [label_w, PAGE_W - label_w])
+        _no_split(row)
+        a, b = row.cells
+        for cell in (a, b):
+            _shade(cell, BLUE_LIGHT)
+            _borders(cell)
+            _margins(cell, 80, 80, 140, 140)
+        _cell_text(a, "📥 Imported result", bold=True, size=9.5, color=NAVY)
+        _cell_text(
+            b,
+            "Not produced by this app from a transcript — reformatted from "
+            "an already-processed write-up, with evidence verified only "
+            "against that write-up's own text.",
+            bold=True, size=10, color=NAVY,
+        )
+    elif header.get("clarifying_skipped"):
         row = _add_row(t, [label_w, PAGE_W - label_w])
         _no_split(row)
         a, b = row.cells

@@ -187,6 +187,7 @@ def init_db() -> None:
                 digest_json TEXT,
                 document_ids_json TEXT,
                 clarifying_skipped INTEGER NOT NULL DEFAULT 0,
+                imported_result INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -232,6 +233,13 @@ def init_db() -> None:
         cur.execute(
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS "
             "clarifying_skipped INTEGER NOT NULL DEFAULT 0"
+        )
+        # Same idempotent pattern, for the "import an already-processed
+        # result" feature — existing rows default to 0 (not imported; a
+        # normal run produced by this app's own analysis).
+        cur.execute(
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS "
+            "imported_result INTEGER NOT NULL DEFAULT 0"
         )
         conn.commit()
         _seed_mom_test_document_if_missing(conn)
@@ -956,6 +964,7 @@ def save_run(
     digest: dict,
     document_ids: list[int] | None = None,
     clarifying_skipped: bool = False,
+    imported_result: bool = False,
 ) -> int:
     """Save one processing run for an interview and return its new row id.
 
@@ -969,11 +978,22 @@ def save_run(
     works unchanged for a multi-hypothesis run. `document_ids` records
     which reference documents were included as context for this run —
     provenance for defending which context produced a given analysis.
-    `clarifying_skipped` records whether this run came from the "Already
-    a full transcript" toggle on Process Interview — no clarifying Q&A
-    was asked (`questions`/`answers` are empty for that reason, not
-    because the model decided it needed nothing), so nobody reviewing
-    this run later mistakes a bypassed step for a clean one.
+    `clarifying_skipped` records whether this run came from the (now
+    removed) "Already a full transcript" toggle on Process Interview — no
+    clarifying Q&A was asked (`questions`/`answers` are empty for that
+    reason, not because the model decided it needed nothing). Only ever
+    True for runs saved while that toggle existed; new runs always pass
+    False here.
+
+    `imported_result` records whether this run came from the "Add an
+    already-processed result" path instead of this app's own analysis —
+    someone pasted a write-up produced elsewhere (e.g. a different Claude
+    conversation run by a teammate who has the transcript this app
+    doesn't), and it was reformatted into this same shape rather than
+    analyzed from scratch. `questions`/`answers` are empty for this case
+    too, same reason, and it's flagged separately from
+    `clarifying_skipped` so every page can tell "we skipped asking" apart
+    from "we never analyzed this at all."
     """
     conn = get_connection()
     try:
@@ -982,8 +1002,8 @@ def save_run(
             "INSERT INTO runs "
             "(interview_id, hypothesis_text, hypotheses_json, questions_json, "
             "answers_json, output_json, digest_json, document_ids_json, "
-            "clarifying_skipped, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "clarifying_skipped, imported_result, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 interview_id,
                 "; ".join(hypotheses),
@@ -994,6 +1014,7 @@ def save_run(
                 json.dumps(digest),
                 json.dumps(document_ids or []),
                 int(bool(clarifying_skipped)),
+                int(bool(imported_result)),
                 _now(),
             ),
         )
@@ -1019,7 +1040,7 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
         cur.execute(
             "SELECT id, interview_id, hypothesis_text, hypotheses_json, questions_json, "
             "answers_json, output_json, digest_json, document_ids_json, "
-            "clarifying_skipped, created_at "
+            "clarifying_skipped, imported_result, created_at "
             "FROM runs WHERE interview_id = %s ORDER BY created_at ASC",
             (interview_id,),
         )
@@ -1035,6 +1056,7 @@ def get_runs_for_interview(interview_id: int) -> list[dict]:
             d["digest"] = json.loads(d.pop("digest_json") or "{}")
             d["document_ids"] = json.loads(d.pop("document_ids_json") or "[]")
             d["clarifying_skipped"] = bool(d["clarifying_skipped"])
+            d["imported_result"] = bool(d["imported_result"])
             runs.append(d)
         return runs
     finally:

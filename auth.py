@@ -19,12 +19,34 @@ import hmac
 import streamlit as st
 
 
+def _disable_overscroll() -> None:
+    """Turn off the browser's elastic "rubber-band" overscroll, which
+    otherwise pulls the page past its top/bottom edge and exposes a strip
+    of the bare white browser canvas behind the app. Lives here (rather
+    than in a styling module) only because require_login() is the one
+    call every page already makes first, so this reaches every page —
+    including the login screen — without touching each page file.
+
+    The last rule hides the wrapper Streamlit puts around this <style>
+    block, which would otherwise add an empty gap at the top of the page."""
+    st.markdown(
+        """<style>
+        html, body, .stApp, .main,
+        [data-testid="stAppViewContainer"], [data-testid="stMain"],
+        [data-testid="stSidebarContent"] { overscroll-behavior: none; }
+        .element-container:has(style), [data-testid="stElementContainer"]:has(style) { display: none; }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+
+
 def require_login() -> None:
     """Block the rest of this page from running until the correct team
     password has been entered this session. Returns immediately (no-op)
     once st.session_state.authenticated is True — set only by a correct
     password, and only in memory for this one browser session, never
     persisted anywhere."""
+    _disable_overscroll()
     if st.session_state.get("authenticated"):
         return
 

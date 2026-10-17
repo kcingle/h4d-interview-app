@@ -588,38 +588,159 @@ def run_step2_after_adaptive_clarifying(
     return data
 
 
-def run_step2_from_transcript(
+_PARSE_PROCESSED_RESULT_SYSTEM_PROMPT = """You are helping a Hacking for Defense student team import an interview
+analysis that was already produced elsewhere — e.g. a teammate ran it through a
+different Claude conversation themselves and shared back the finished write-up,
+not the raw transcript. Your only job is to RE-EXPRESS what is already in that
+write-up into the structure below, so it can be stored and browsed alongside
+analyses this app produced itself. You are not analyzing an interview and you
+are not judging anything — you are extracting and reformatting content that
+already exists in the provided text.
+
+You will be given the list of hypotheses this team's hypothesis tree currently
+has active, and the full text of the already-completed analysis/briefing. That
+text often follows this app's own report layout (an "Interview Analysis" header
+with Interviewee / Date / Hypothesis tested, then numbered sections for the Mom
+Test audit, pains and gains, hypothesis ledger, sharper questions, Slack
+write-up, and claims to verify) — possibly flattened from a Word file, so table
+rows may appear as cells joined by " | ". It may also be a looser write-up in
+any layout; find the equivalent content wherever it is.
+
+Produce, in this exact order:
+1. Mom Test audit — a table with exactly these columns: "Questions that fail the
+   Mom Test we asked (verbatim in quotes)" | "What was wrong with the question
+   (leading / hypothetical / asks for an opinion about the future / fishing for
+   a compliment)" | "A better question about past behavior". Include a row only
+   if the provided text already identifies a failing question. If it doesn't
+   cover this at all, return no rows.
+2. Pains-and-gains table — exactly these columns: "Type of attribute (Pain or
+   Gain)" | "What it is" | "Verbatim quote" | "Evidence of strength (Repeated /
+   Single mention / Inferred)". Only include a row if the provided text already
+   gives a verbatim quote for it.
+3. Hypothesis ledger — exactly these columns: "Claim" | "Validated / Invalidated
+   / Untested" | "Evidence". Produce exactly one row per hypothesis in the list
+   you were given, IN THAT ORDER. For each one, search the provided text for a
+   judgment on it even if worded differently than the hypothesis statement
+   itself — use your judgment to match it to the right part of the write-up. If
+   the provided text genuinely does not address a given hypothesis, output
+   "Untested" with empty evidence for that row rather than guessing.
+4. Three sharper questions to ask the next beneficiary — carry over whatever the
+   provided text already suggests (fewer than three if that's all it has; none
+   if it suggests none).
+5. A Slack write-up with exactly these headings: "Hypothesis tested" / "What we
+   learned" / "Where we were wrong" / "Next steps" — reusing the provided text's
+   own write-up/summary content for each, or leaving a heading blank if the
+   source text has nothing for it.
+
+FINALLY: carry over the list of claims the provided text already flags as
+needing verification (empty list if it flags none).
+
+ALSO fill interview_metadata from what the text states about the interview
+itself: the interviewee's name (or a descriptive label if anonymous, e.g.
+"CENTCOM action officer"), role/title, organization/unit, seniority level,
+military rank (e.g. "Maj / O-4"), branch of service, relationship to the problem
+(exactly "beneficiary", "adjacent", "expert", or blank if unclear), a one-line
+descriptor of who they are, the interview date as YYYY-MM-DD (blank if no date
+is given — never guess), and the names of the people who conducted the
+interview (empty list if not named). Leave any field blank rather than guessing.
+
+RULES: Quote verbatim from the PROVIDED TEXT only — never invent, paraphrase, or
+improve a quote, and never pull in outside knowledge. Copy every quote exactly
+as it appears in the provided text (same words, same order) so it can be found
+again by exact search. Where the provided text is ambiguous or silent, leave the
+corresponding field empty/Untested rather than filling a gap. This is a
+reformatting task, not an analysis task."""
+
+_IMPORT_METADATA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name_or_label": {"type": "string"},
+        "role": {"type": "string"},
+        "organization": {"type": "string"},
+        "seniority_level": {"type": "string"},
+        "rank": {"type": "string"},
+        "branch_service": {"type": "string"},
+        "relationship": {"type": "string", "enum": ["", "beneficiary", "adjacent", "expert"]},
+        "descriptor": {"type": "string"},
+        "interview_date": {"type": "string"},
+        "interviewers": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "name_or_label", "role", "organization", "seniority_level", "rank",
+        "branch_service", "relationship", "descriptor", "interview_date", "interviewers",
+    ],
+    "additionalProperties": False,
+}
+
+# ANALYSIS_SCHEMA plus the interview's own metadata, so one call both
+# reformats the write-up and identifies who/when it was — the separate
+# suggest_metadata call is skipped for an import. The metadata is popped
+# off before the analysis is saved, so a saved run's output is exactly
+# the ANALYSIS_SCHEMA shape every other run has.
+_IMPORT_SCHEMA = {
+    **ANALYSIS_SCHEMA,
+    "properties": {**ANALYSIS_SCHEMA["properties"], "interview_metadata": _IMPORT_METADATA_SCHEMA},
+    "required": ANALYSIS_SCHEMA["required"] + ["interview_metadata"],
+}
+
+
+def parse_processed_result(
     hypotheses: list[str],
-    raw_notes: str,
+    processed_text: str,
     api_key: str,
-    documents: list[dict] | None = None,
     additional_notes: str = "",
-) -> dict:
-    """Step 2 straight from a full transcript, with no clarifying-question
-    round trip at all — for notes someone says are already a complete
-    transcript, where the flipped-interaction loop above would just be
-    probing gaps that aren't there. Runs under the exact same, unmodified
-    SYSTEM_PROMPT and ANALYSIS_SCHEMA as run_step2_after_adaptive_clarifying;
-    the only difference is the history handed to it is a single user
-    message (the same one start_adaptive_clarifying's round 1 would have
-    built) with no assistant Q&A appended — so this also costs strictly
-    less than the normal flow, not the same: none of the 3 clarifying
-    calls happen."""
+) -> tuple[dict, dict]:
+    """Ingest an already-processed result (e.g. a briefing/write-up a
+    teammate produced in a separate Claude conversation, outside this app,
+    from a transcript nobody here has access to) and reformat it into the
+    same ANALYSIS_SCHEMA shape run_step2_after_adaptive_clarifying returns —
+    so it can be saved, digested, and displayed exactly like any other run,
+    as closely as is honestly possible without the original transcript.
+
+    Deliberately its own system prompt (_PARSE_PROCESSED_RESULT_SYSTEM_PROMPT),
+    never the graded SYSTEM_PROMPT — this is a reformatting task, not the
+    graded analysis, and must not be confused with it. No clarifying-question
+    round trip either: there is nothing to clarify about a write-up that
+    already exists. Callers should save the resulting run with
+    `imported_result=True` (see storage.save_run) so it's clearly labeled
+    everywhere as imported rather than produced by this app's own analysis.
+
+    Returns (analysis, metadata): `analysis` in the ANALYSIS_SCHEMA shape;
+    `metadata` in suggest_metadata's shape plus "interview_date"
+    (YYYY-MM-DD or "") and "interviewers" (list of names), read from the
+    write-up itself — so the metadata form can be pre-filled without a
+    second call."""
+    client = _client(api_key)
     hypotheses_block = "\n".join(f"- {h}" for h in hypotheses)
     user_text = (
-        f"Hypotheses being tested:\n{hypotheses_block}\n\n"
-        f"Raw interview notes:\n{raw_notes}"
+        f"Hypotheses to match against:\n{hypotheses_block}\n\n"
+        f"Already-completed analysis/write-up to import:\n{processed_text}"
     )
     if additional_notes and additional_notes.strip():
         user_text += (
-            "\n\nAdditional notes from the interviewer (not part of the "
-            "transcript — e.g. nonverbal communication, tone, body language, "
-            "the setting, or other context observed during the interview):\n"
+            "\n\nAdditional notes (also already-written context to draw from, "
+            "not a transcript):\n"
             f"{additional_notes.strip()}"
         )
-    user_content = _build_user_message_content(user_text, documents)
-    history = [{"role": "user", "content": user_content}]
-    return run_step2_after_adaptive_clarifying(history, api_key, documents=documents)
+    response = _call(
+        client,
+        messages=[{"role": "user", "content": user_text}],
+        schema=_IMPORT_SCHEMA,
+        system=_build_system(None, base_prompt=_PARSE_PROCESSED_RESULT_SYSTEM_PROMPT),
+        # A long write-up re-expressed as JSON can be sizable on its own,
+        # on top of thinking — give it more room than the default.
+        max_tokens=20000,
+    )
+    data = _extract_json(response)
+    data["sharper_questions"] = list(data.get("sharper_questions", []))[:3]
+    raw_meta = data.pop("interview_metadata", None) or {}
+    metadata = {field: (raw_meta.get(field) or "") for field in BLANK_METADATA}
+    date = (raw_meta.get("interview_date") or "").strip()
+    metadata["interview_date"] = date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else ""
+    metadata["interviewers"] = [
+        n.strip() for n in (raw_meta.get("interviewers") or []) if isinstance(n, str) and n.strip()
+    ][:5]
+    return data, metadata
 
 
 # ---------------------------------------------------------------------------
@@ -929,7 +1050,15 @@ CHAT_SYSTEM_INSTRUCTIONS = (
     "synthesize across multiple interviews (spot a pattern, count how "
     "many validated a hypothesis, compare two interviewees) as long as "
     "every individual claim inside that synthesis still traces back to a "
-    "specific interview."
+    "specific interview.\n\n"
+    "Some interviews were imported as an already-processed write-up "
+    "instead of a raw transcript (they're labeled that way above). Treat "
+    "those as full members of the corpus: the quotes inside that write-up "
+    "are that interviewee's words, and its findings, verdicts, pains, and "
+    "gains are that interview's evidence — use them exactly as you would a "
+    "transcript-based interview. Only mention that the raw transcript "
+    "isn't on file if the question needs something a write-up couldn't "
+    "contain (e.g. exact wording beyond what it quotes)."
 )
 
 
@@ -1033,10 +1162,16 @@ def build_corpus_context(
         )
         lines.append(additional_notes if additional_notes else "(none)")
 
-        lines.append("Raw transcript:")
+        runs = interview.get("runs") or []
+        imported = any(run.get("imported_result") for run in runs)
+        lines.append(
+            "Imported already-processed write-up for this interview (no raw "
+            "transcript on file — this write-up, including its verbatim "
+            "quotes, is the interview's source material):"
+            if imported else "Raw transcript:"
+        )
         lines.append(interview.get("raw_text") or "(empty)")
 
-        runs = interview.get("runs") or []
         if not runs:
             lines.append("(no runs processed for this interview yet)")
         for i, run in enumerate(runs, start=1):

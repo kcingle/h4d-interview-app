@@ -92,6 +92,7 @@ def build_export_header(
         "date": (run.get("created_at") or "")[:19].replace("T", " ") or None,
         "documents": ", ".join(document_titles) if document_titles else None,
         "clarifying_skipped": bool(run.get("clarifying_skipped")),
+        "imported_result": bool(run.get("imported_result")),
     }
 
 
@@ -111,7 +112,15 @@ def _format_header_lines(hypothesis: str, header: dict | None) -> list[str]:
     lines.append(f"**Hypothesis tested:** {hypothesis}")
     if header:
         lines.append(f"**Reference documents used:** {header.get('documents') or 'Not recorded'}")
-        if header.get("clarifying_skipped"):
+        if header.get("imported_result"):
+            lines.append(
+                "**📥 Imported from an already-processed result:** this "
+                "analysis was not produced by this app from a transcript — "
+                "it was reformatted from a write-up someone already had "
+                "(e.g. from a separate Claude conversation), and its "
+                "evidence is verified only against that write-up's own text."
+            )
+        elif header.get("clarifying_skipped"):
             lines.append(
                 "**⚠ Clarifying questions skipped:** submitted as an already-"
                 "complete transcript — nobody was asked follow-up questions "
@@ -217,7 +226,16 @@ def render_analysis(
     rather than being skipped, so a run missing metadata or documents
     still exports cleanly.
     """
-    if export_header and export_header.get("clarifying_skipped"):
+    if export_header and export_header.get("imported_result"):
+        st.info(
+            "📥 Imported from an already-processed result — this analysis "
+            "wasn't produced by this app from a transcript. It was "
+            "reformatted from a write-up someone already had (e.g. from a "
+            "separate Claude conversation), and its evidence is verified "
+            "only against that write-up's own text, not an original "
+            "transcript."
+        )
+    elif export_header and export_header.get("clarifying_skipped"):
         st.warning(
             "⚠ Clarifying questions skipped — submitted as an already-"
             "complete transcript. Nobody was asked follow-up questions "

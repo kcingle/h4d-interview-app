@@ -31,6 +31,17 @@ and past runs — works with no key.
   the interview and hands off IMMEDIATELY to the Interviews page for that
   one interview (pre-selected, its run auto-expanded) — the redirect
   never waits on anything else, including interviewee metadata.
+  Choosing **"An already-processed interview (upload a file)"** instead
+  skips the transcript/clarifying flow: upload a finished write-up
+  (.docx — including this app's own Word export — .pdf, .md, or .txt;
+  `report_import.py` extracts its full text, tables included) and
+  `ai.parse_processed_result` reformats it into the standard analysis
+  structure in one call, also reading the interviewee's name, role,
+  rank, interview date, and interviewers off it to pre-fill the
+  metadata step. The extracted text is saved as the interview's source
+  text, so Corpus Chat reads all of it and its quotes verify into the
+  digest that Search/Compare/Hypothesis Findings use. Flagged
+  everywhere as imported.
 - **Interviews** — browse every saved interview, review all of its past
   runs (each kept forever, each exportable to Markdown/.txt with a
   provenance header), inspect or regenerate that run's structured digest
