@@ -39,6 +39,7 @@ import ai
 import auth
 import env_store
 import storage
+import ui_feedback
 
 st.set_page_config(page_title="H4D Interview App — Search, Compare & Chat", page_icon="🔍")
 auth.require_login()
@@ -263,11 +264,27 @@ with tab_chat:
         "Ask about the interviews, hypotheses, or people...",
         disabled=not api_key, key="corpus_chat_input",
     )
-    if user_message:
+    # A failed message is kept so "Try again" can resend it — the chat
+    # box has already cleared by then, so it would otherwise be lost.
+    failed_message = st.session_state.get("chat_failed_message")
+    shown_failed = False
+    if not user_message and failed_message:
+        shown_failed = True
         with st.chat_message("user"):
-            st.markdown(user_message)
+            st.markdown(failed_message)
+        if ui_feedback.retry_notice(
+            ui_feedback.pending_failure("chat") or "That message didn't go through.",
+            key="chat_retry",
+        ):
+            user_message = failed_message
+    if user_message:
+        st.session_state.pop("chat_failed_message", None)
+        ui_feedback.clear_failure("chat")
+        if not shown_failed:
+            with st.chat_message("user"):
+                st.markdown(user_message)
         try:
-            with st.spinner("Thinking..."):
+            with st.spinner("Reading the interviews and writing an answer (about 10–30 seconds)..."):
                 result = ai.run_chat(
                     st.session_state.chat_history,
                     user_message,
@@ -278,7 +295,9 @@ with tab_chat:
             with st.chat_message("assistant"):
                 st.markdown(result["reply"])
         except ai.AIError as e:
-            st.error(str(e))
+            st.session_state.chat_failed_message = user_message
+            ui_feedback.remember_failure("chat", str(e))
+            st.rerun()
 
     if st.session_state.chat_history:
         if st.button("🗑️ Clear conversation"):
@@ -316,7 +335,7 @@ with tab_define:
                 context = _get_or_build_context()
                 st.session_state.define_results = ai.define_terms(define_query, context, api_key)
         except ai.AIError as e:
-            st.error(str(e))
+            st.warning(f"⚠️ {e} Click the button again to retry.")
 
     define_results = st.session_state.get("define_results")
     if define_results is not None:

@@ -24,3 +24,14 @@ MODEL_NAME_SMALL = "claude-haiku-4-5"
 # header automatically on every request, so this constant is kept here as
 # documented reference in case raw HTTP is ever used instead.
 API_VERSION = "2023-06-01"
+
+# Network limits for every Anthropic call. One automatic retry (the SDK
+# retries timeouts, connection errors, 429 and 5xx), so a single hiccup
+# during a live run recovers on its own and a real outage surfaces within
+# a few minutes as a calm retry notice instead of hanging. The long
+# timeout is for the graded analysis (up to 16k output tokens, thinking
+# included); the short one is for the small Haiku extraction calls.
+API_MAX_RETRIES = 1
+API_TIMEOUT_SECONDS = 300
+API_TIMEOUT_SMALL_SECONDS = 60
+API_CONNECT_TIMEOUT_SECONDS = 15

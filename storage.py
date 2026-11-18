@@ -33,9 +33,13 @@ is a bare `SELECT COUNT(*)`, which RealDictCursor can't index positionally
 """
 
 import base64
+import contextlib
+import functools
+import inspect
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 import psycopg2
@@ -74,8 +78,84 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     was effectively free to reopen."""
     global _POOL
     if _POOL is None:
-        _POOL = psycopg2.pool.ThreadedConnectionPool(1, 10, _get_database_url())
+        # connect_timeout: Neon wakes a suspended compute in a few
+        # seconds; without a cap, an unreachable database would hang the
+        # page forever instead of failing into the retry notice.
+        _POOL = psycopg2.pool.ThreadedConnectionPool(
+            1, 10, _get_database_url(), connect_timeout=15
+        )
     return _POOL
+
+
+def _reset_pool() -> None:
+    """Throw away every pooled connection so the next call starts fresh.
+    Used after a connection-level failure, when the pool may be full of
+    connections to a compute that has since gone away."""
+    global _POOL
+    if _POOL is not None:
+        try:
+            _POOL.closeall()
+        except Exception:
+            pass
+    _POOL = None
+
+
+class DatabaseUnavailable(Exception):
+    """A connection-level database failure (dropped connection, Neon
+    unreachable), already worded for display."""
+
+
+DB_UNAVAILABLE_MESSAGE = (
+    "The database didn't respond just now (it may have been waking up). "
+    "Nothing you entered was lost. Wait a few seconds, then try again."
+)
+
+_raise_mode = threading.local()
+
+
+@contextlib.contextmanager
+def raise_db_errors():
+    """Inside this block, a connection failure raises DatabaseUnavailable
+    for the caller to handle (Process Interview does, so it can keep a
+    finished analysis and offer "try saving again"). Everywhere else the
+    failure is shown as a calm notice with a retry button and the page
+    stops, so no page can show a raw traceback for it."""
+    previous = getattr(_raise_mode, "on", False)
+    _raise_mode.on = True
+    try:
+        yield
+    finally:
+        _raise_mode.on = previous
+
+
+def _handle_db_failure(exc: Exception):
+    _reset_pool()
+    if getattr(_raise_mode, "on", False):
+        raise DatabaseUnavailable(DB_UNAVAILABLE_MESSAGE) from exc
+    try:
+        from streamlit.runtime import exists as _in_streamlit
+    except Exception:
+        _in_streamlit = lambda: False  # noqa: E731
+    if not _in_streamlit():
+        raise DatabaseUnavailable(DB_UNAVAILABLE_MESSAGE) from exc
+    import streamlit as st
+    import ui_feedback
+    ui_feedback.retry_notice(DB_UNAVAILABLE_MESSAGE, key="_db_retry")
+    st.stop()
+
+
+def _db_guarded(fn):
+    """Route connection-level psycopg2 failures through
+    _handle_db_failure. Only OperationalError/InterfaceError (the
+    connection itself failing): a genuine SQL/data bug still raises
+    normally, because retrying it would never help."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            _handle_db_failure(exc)
+    return wrapper
 
 
 def get_connection():
@@ -1626,6 +1706,17 @@ def update_visual_resource_caption(resource_id: int, caption: str) -> None:
     finally:
         release_connection(conn)
 
+
+# Guard every public function (and init_db) against connection drops —
+# applied here, once, rather than by decorating ~50 functions by hand.
+for _name, _fn in list(globals().items()):
+    if (
+        inspect.isfunction(_fn)
+        and _fn.__module__ == __name__
+        and not _name.startswith("_")
+        and _name not in ("raise_db_errors", "get_connection", "release_connection")
+    ):
+        globals()[_name] = _db_guarded(_fn)
 
 # Make sure the database and tables exist as soon as this module is
 # imported, no matter which page Streamlit happens to load first.
