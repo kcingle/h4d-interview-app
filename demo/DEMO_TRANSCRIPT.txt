@@ -1,0 +1,35 @@
+Interviewer: Thanks for making time. Can you start by telling us what your platoon does?
+1LT Vance: Sure. I'm a scout platoon leader. Six vehicles, about thirty soldiers. Our job is to find the enemy before the squadron runs into them, and report what we see. If our reports are wrong, everyone behind us makes decisions on bad information.
+
+Interviewer: Tell me about the last time you lost GPS in training.
+1LT Vance: Last month at the training center. Second night of the force on force exercise. We were moving to set up a screen line and the screens just started lying. My own icon jumped about a kilometer. My platoon sergeant called me on the radio and said, sir, I think we're getting jammed.
+
+Interviewer: How long had it been going on before he called?
+1LT Vance: Honestly, I don't know. Maybe ten minutes? I was looking at the screen and it looked fine to me. I'm a little embarrassed about that.
+
+Interviewer: What did the platoon do next?
+1LT Vance: We stopped and did a hasty map check. My platoon sergeant and two of the section sergeants were solid with a map. The rest of us were slow. I'll be honest, I hadn't done terrain association at night since my officer basic course.
+
+Interviewer: Did that affect your reports?
+1LT Vance: Yes. My first two contact reports after that were off. One by about 300 meters, one by more than a kilometer. The kilometer one was mine. I put an enemy vehicle on the wrong hill.
+
+Interviewer: How did you find out it was wrong?
+1LT Vance: The observer controller told me at the after action review. Nobody caught it during the fight. The troop just passed it up.
+
+Interviewer: When you send a grid, is there any way to say how you got it?
+1LT Vance: Not really. On the radio I could say this is a map grid, and sometimes I do. On the digital system it's just a grid. My troop commander told me afterward he would have treated it differently if he'd known it came off a map at night.
+
+Interviewer: What have you tried since then?
+1LT Vance: We've started doing a navigation lane every month with the GPS turned off. It's only been two months, so I can't tell you it worked yet. The guys complain, but they're getting faster.
+
+Interviewer: Have you looked at any devices?
+1LT Vance: I looked at a couple online. One was a small inertial unit you mount on the dash. The reviews from hikers were great, but I couldn't find anybody military who'd used it. And it needed its own app on a phone, and we don't carry personal phones on the line.
+
+Interviewer: What would a device need to do for you to actually use it?
+1LT Vance: Work with what we already have. Show on the vehicle screen. And if it's not sure, say so. I'd rather have a fuzzy circle that's honest than a sharp dot that's wrong.
+
+Interviewer: Who decides whether something like that gets bought?
+1LT Vance: Not me. Probably the squadron S3 and S6, and then somebody at brigade with money. I'd be willing to test something with my platoon and write up what we find. I've done that once before for a radio mount and it got passed up the chain.
+
+Interviewer: Anything we should have asked and didn't?
+1LT Vance: Maybe ask about the second night. We expected the jamming the second night, so we planned for it. We were slower, but our reports were right. It made me think the gear matters, but the habit matters more.
