@@ -30,6 +30,7 @@ import auth
 import env_store
 import report_import
 import storage
+import ui_feedback
 from render import render_hypothesis_picker
 
 RELATIONSHIP_OPTIONS = ["", "beneficiary", "adjacent", "expert"]
@@ -156,40 +157,51 @@ if st.session_state.flow_stage == "metadata":
             metadata_skipped = st.form_submit_button("Skip for now")
 
     if metadata_confirmed:
-        person_id = storage.add_person(
-            name=m_name.strip(),
-            role=m_role.strip(),
-            organization=m_org.strip(),
-            seniority_level=m_seniority.strip(),
-            relationship=m_relationship,
-            interview_date=m_date.isoformat(),
-            descriptor=m_descriptor.strip(),
-            rank=m_rank.strip(),
-            branch_service=m_branch.strip(),
-            interview_status=m_status,
-            interviewers=[
-                m_interviewer_1, m_interviewer_2, m_interviewer_3,
-                m_interviewer_4, m_interviewer_5,
-            ],
-        )
-        # Linking the person retitles the interview to the standard
-        # "(rank name, date)" format off the metadata just confirmed —
-        # picking up any correction made to the suggested name above.
-        storage.set_interview_person(meta_interview_id, person_id)
+        try:
+            with storage.raise_db_errors():
+                # Remembered across a failed attempt, so clicking Confirm
+                # again after a database hiccup never adds the person twice.
+                person_id = st.session_state.get("proc_meta_person_id")
+                if person_id is None:
+                    person_id = storage.add_person(
+                        name=m_name.strip(),
+                        role=m_role.strip(),
+                        organization=m_org.strip(),
+                        seniority_level=m_seniority.strip(),
+                        relationship=m_relationship,
+                        interview_date=m_date.isoformat(),
+                        descriptor=m_descriptor.strip(),
+                        rank=m_rank.strip(),
+                        branch_service=m_branch.strip(),
+                        interview_status=m_status,
+                        interviewers=[
+                            m_interviewer_1, m_interviewer_2, m_interviewer_3,
+                            m_interviewer_4, m_interviewer_5,
+                        ],
+                    )
+                    st.session_state.proc_meta_person_id = person_id
+                # Linking the person retitles the interview to the standard
+                # "(rank name, date)" format off the metadata just confirmed —
+                # picking up any correction made to the suggested name above.
+                storage.set_interview_person(meta_interview_id, person_id)
 
-        # Refresh this run's digest now that the interviewee is known.
-        person = storage.get_person(person_id)
-        refreshed_digest = ai.build_digest(
-            meta_hypotheses, meta_analysis, meta_raw_text, api_key,
-            person, additional_notes=meta_notes or "",
-        )
-        storage.update_run_digest(meta_run_id, refreshed_digest)
+                # Refresh this run's digest now that the interviewee is known.
+                person = storage.get_person(person_id)
+                with st.spinner("Saving the interviewee details (a few seconds)..."):
+                    refreshed_digest = ai.build_digest(
+                        meta_hypotheses, meta_analysis, meta_raw_text, api_key,
+                        person, additional_notes=meta_notes or "",
+                    )
+                storage.update_run_digest(meta_run_id, refreshed_digest)
+        except storage.DatabaseUnavailable as e:
+            st.warning(f"⚠️ {e} Then click **Confirm and save metadata** again.")
+            st.stop()
 
         for key in (
             "pending_metadata_interview_id", "pending_metadata_run_id",
             "pending_metadata_raw_text", "pending_metadata_notes",
             "pending_metadata_hypotheses", "pending_metadata_analysis",
-            "metadata_suggestion", "metadata_suggestion_for",
+            "metadata_suggestion", "metadata_suggestion_for", "proc_meta_person_id",
         ):
             st.session_state.pop(key, None)
         _go_to_interviews(meta_interview_id)
@@ -206,7 +218,7 @@ if st.session_state.flow_stage == "metadata":
             "pending_metadata_interview_id", "pending_metadata_run_id",
             "pending_metadata_raw_text", "pending_metadata_notes",
             "pending_metadata_hypotheses", "pending_metadata_analysis",
-            "metadata_suggestion", "metadata_suggestion_for",
+            "metadata_suggestion", "metadata_suggestion_for", "proc_meta_person_id",
         ):
             st.session_state.pop(key, None)
         _go_to_interviews(meta_interview_id)
@@ -381,16 +393,24 @@ def _finish_analysis_and_save(
     `metadata_suggestion` (import path only) is the interviewee metadata
     ai.parse_processed_result already read off the write-up — used
     instead of a separate ai.suggest_metadata call, and it can carry the
-    real interview date and interviewers too."""
+    real interview date and interviewers too.
+
+    Safe to call again after a database failure: whatever already saved
+    (the interview row, its run) is remembered in session_state and not
+    written twice, so "Try again" never creates a duplicate interview."""
     docs_for_step2 = st.session_state.get("selected_documents", [])
+    hypotheses_for_run = st.session_state.get("selected_hypotheses") or selected_hypotheses
     # Step 3: persist immediately. This always creates a NEW interview +
     # its first run. `person=None` here — interviewee metadata isn't
     # confirmed yet; that happens in the metadata stage right below,
     # which regenerates this digest once the person is known.
-    digest = ai.build_digest(
-        selected_hypotheses, analysis, raw_notes, api_key,
-        person=None, additional_notes=additional_notes,
-    )
+    if st.session_state.get("proc_digest") is None:
+        with st.spinner("Indexing quotes and topics for search (a few seconds)..."):
+            st.session_state.proc_digest = ai.build_digest(
+                hypotheses_for_run, analysis, raw_notes, api_key,
+                person=None, additional_notes=additional_notes,
+            )
+    digest = st.session_state.proc_digest
     # Identify the interviewee BEFORE the interview row is created, so it
     # is saved under their name on the very first write — there is never a
     # moment where a provisional, nameless title exists to be left behind
@@ -400,45 +420,55 @@ def _finish_analysis_and_save(
     # paying for it twice, and it never raises (blank dict on failure).
     if metadata_suggestion is not None:
         suggestion = metadata_suggestion
+    elif st.session_state.get("proc_suggestion") is not None:
+        suggestion = st.session_state.proc_suggestion
     else:
-        with st.spinner("Identifying the interviewee..."):
+        with st.spinner("Identifying the interviewee (a few seconds)..."):
             suggestion = ai.suggest_metadata(raw_notes, api_key)
+    st.session_state.proc_suggestion = suggestion
     title = storage.build_interview_title(
         suggestion["name_or_label"],
         suggestion["rank"],
         suggestion.get("interview_date") or datetime.date.today().isoformat(),
     )
-    interview_id = storage.save_interview(title, raw_notes, notes=additional_notes)
-    document_ids = [d["id"] for d in docs_for_step2]
-    answered = st.session_state.get("adaptive_answered", [])
-    run_id = storage.save_run(
-        interview_id,
-        selected_hypotheses,
-        [q for q, _ in answered],
-        [a for _, a in answered],
-        analysis,
-        digest,
-        document_ids=document_ids,
-        clarifying_skipped=clarifying_skipped,
-        imported_result=imported_result,
-    )
-
-    # Save any uploaded media against this interview. A file over the
-    # size cap doesn't block the interview itself from saving — that
-    # analysis work is done and shouldn't be lost over one oversized
-    # upload — it's just skipped, with the reason shown once we land on
-    # Interviews.
-    media_errors = []
-    for filename, content, mime_type in st.session_state.get("pending_media", []):
-        try:
-            storage.add_visual_resource(
-                interview_id, filename, content, mime_type,
-                caption=st.session_state.get("pending_media_caption", ""),
+    with storage.raise_db_errors():
+        interview_id = st.session_state.get("proc_saved_interview_id")
+        if interview_id is None:
+            interview_id = storage.save_interview(title, raw_notes, notes=additional_notes)
+            st.session_state.proc_saved_interview_id = interview_id
+        document_ids = [d["id"] for d in docs_for_step2]
+        answered = st.session_state.get("adaptive_answered", [])
+        run_id = st.session_state.get("proc_saved_run_id")
+        if run_id is None:
+            run_id = storage.save_run(
+                interview_id,
+                hypotheses_for_run,
+                [q for q, _ in answered],
+                [a for _, a in answered],
+                analysis,
+                digest,
+                document_ids=document_ids,
+                clarifying_skipped=clarifying_skipped,
+                imported_result=imported_result,
             )
-        except storage.VisualResourceError as e:
-            media_errors.append(str(e))
-    if media_errors:
-        st.session_state["media_upload_errors"] = media_errors
+            st.session_state.proc_saved_run_id = run_id
+
+        # Save any uploaded media against this interview. A file over the
+        # size cap doesn't block the interview itself from saving — that
+        # analysis work is done and shouldn't be lost over one oversized
+        # upload — it's just skipped, with the reason shown once we land on
+        # Interviews.
+        media_errors = []
+        for filename, content, mime_type in st.session_state.get("pending_media", []):
+            try:
+                storage.add_visual_resource(
+                    interview_id, filename, content, mime_type,
+                    caption=st.session_state.get("pending_media_caption", ""),
+                )
+            except storage.VisualResourceError as e:
+                media_errors.append(str(e))
+        if media_errors:
+            st.session_state["media_upload_errors"] = media_errors
 
     # Move into the metadata-confirmation stage, still on this page —
     # stash what that stage needs, since the widgets above (raw_notes,
@@ -447,18 +477,157 @@ def _finish_analysis_and_save(
     st.session_state["pending_metadata_run_id"] = run_id
     st.session_state["pending_metadata_raw_text"] = raw_notes
     st.session_state["pending_metadata_notes"] = additional_notes
-    st.session_state["pending_metadata_hypotheses"] = selected_hypotheses
+    st.session_state["pending_metadata_hypotheses"] = hypotheses_for_run
     st.session_state["pending_metadata_analysis"] = analysis
     st.session_state["metadata_suggestion"] = suggestion
     st.session_state["metadata_suggestion_for"] = interview_id
     for key in (
         "pending_media", "pending_media_caption", "adaptive_history",
         "adaptive_current_question", "adaptive_round", "adaptive_answered",
+        *_PROC_PENDING_KEYS,
     ):
         st.session_state.pop(key, None)
+    ui_feedback.clear_failure("process")
     st.session_state.flow_stage = "metadata"
     st.rerun()
 
+
+# Everything a half-finished run remembers between a failure and its
+# "Try again", so a retry resumes where it stopped instead of starting
+# over (or saving twice). Cleared on success and on every fresh Start.
+_PROC_PENDING_KEYS = (
+    "proc_pending_analysis", "proc_pending_flags", "proc_digest",
+    "proc_suggestion", "proc_saved_interview_id", "proc_saved_run_id",
+    "proc_pending_answer", "proc_retry_action",
+)
+
+WAIT_FIRST_QUESTION = (
+    "Reading the interview and choosing the first clarifying question "
+    "(a few seconds)..."
+)
+WAIT_NEXT_QUESTION = "Choosing the next question based on your answer (a few seconds)..."
+WAIT_ANALYSIS = (
+    "Analyzing the interview against the selected hypotheses. This usually "
+    "takes about a minute and can take up to 3 minutes. Please keep this tab open..."
+)
+WAIT_IMPORT = (
+    "Reading the processed interview into this app's structure. This takes "
+    "about a minute..."
+)
+
+
+def _analyze_and_save():
+    """Run the graded analysis (unless an earlier attempt already finished
+    it) and save. Keeping the finished analysis in session_state means a
+    database failure during the save never costs another minute-long AI
+    call on retry."""
+    if st.session_state.get("proc_pending_analysis") is None:
+        with st.spinner(WAIT_ANALYSIS):
+            st.session_state.proc_pending_analysis = ai.run_step2_after_adaptive_clarifying(
+                st.session_state.adaptive_history, api_key,
+                documents=st.session_state.get("selected_documents", []),
+            )
+    flags = st.session_state.get("proc_pending_flags") or {}
+    _finish_analysis_and_save(st.session_state.proc_pending_analysis, **flags)
+
+
+def _do_start():
+    if importing_processed_result:
+        # Nothing to clarify and nothing to analyze — the write-up
+        # already exists; just reformat it into this app's structure.
+        # flow_stage never enters "clarifying" on this path.
+        if st.session_state.get("proc_pending_analysis") is None:
+            with st.spinner(WAIT_IMPORT):
+                analysis, imported_metadata = ai.parse_processed_result(
+                    st.session_state.get("selected_hypotheses") or selected_hypotheses,
+                    raw_notes,
+                    api_key,
+                    additional_notes=additional_notes,
+                )
+            st.session_state.proc_pending_analysis = analysis
+            st.session_state.proc_pending_flags = {
+                "imported_result": True, "metadata_suggestion": imported_metadata,
+            }
+        _analyze_and_save()
+        return
+    with st.spinner(WAIT_FIRST_QUESTION):
+        step1 = ai.start_adaptive_clarifying(
+            st.session_state.get("selected_hypotheses") or selected_hypotheses,
+            raw_notes,
+            api_key,
+            documents=st.session_state.get("selected_documents", []),
+            additional_notes=additional_notes,
+        )
+    st.session_state.adaptive_history = step1["history"]
+    if step1["question"]:
+        st.session_state.adaptive_current_question = step1["question"]
+        st.session_state.adaptive_round = step1["round"]
+        st.session_state.flow_stage = "clarifying"
+        st.rerun()
+    else:
+        # The model decided it needs nothing at all for this interview —
+        # go straight to the full analysis rather than showing an empty
+        # clarifying step with nothing to answer.
+        st.session_state.adaptive_current_question = None
+        st.session_state.flow_stage = "clarifying"
+        _analyze_and_save()
+
+
+def _do_answer():
+    """Send the stashed answer to the current question. The answer is
+    only recorded in "Answered so far" once the AI call succeeds, so a
+    retry after a failure never records it twice."""
+    question = st.session_state.adaptive_current_question
+    answer = st.session_state.get("proc_pending_answer", "")
+    with st.spinner(WAIT_NEXT_QUESTION):
+        nxt = ai.continue_adaptive_clarifying(
+            st.session_state.adaptive_history,
+            question,
+            answer,
+            st.session_state.adaptive_round,
+            api_key,
+            documents=st.session_state.get("selected_documents", []),
+        )
+    st.session_state.adaptive_answered.append((question, answer))
+    st.session_state.adaptive_history = nxt["history"]
+    st.session_state.pop("proc_pending_answer", None)
+    if nxt["question"]:
+        st.session_state.adaptive_current_question = nxt["question"]
+        st.session_state.adaptive_round = nxt["round"]
+        st.rerun()
+    # No more questions: from here a retry only re-runs the analysis/save.
+    st.session_state.adaptive_current_question = None
+    _analyze_and_save()
+
+
+_PROC_ACTIONS = {"start": _do_start, "answer": _do_answer, "analyze": _analyze_and_save}
+
+
+def _run_step(action_name: str):
+    """Run one step of the flow. Any AI or database failure becomes a
+    calm notice with a "Try again" button that re-runs the same step."""
+    ui_feedback.clear_failure("process")
+    st.session_state.proc_retry_action = action_name
+    try:
+        _PROC_ACTIONS[action_name]()
+    except (ai.AIError, storage.DatabaseUnavailable) as e:
+        ui_feedback.remember_failure("process", str(e))
+        st.rerun()
+
+
+def _render_failure_notice():
+    message = ui_feedback.pending_failure("process")
+    if not message:
+        return
+    action = st.session_state.get("proc_retry_action") or "start"
+    if (
+        st.session_state.flow_stage == "clarifying"
+        and st.session_state.get("adaptive_current_question") is None
+    ):
+        # Every question is answered; only the analysis/save is left.
+        action = "analyze"
+    if ui_feedback.retry_notice(message, key=f"proc_retry_{action}"):
+        _run_step(action)
 
 
 start_clicked = st.button(
@@ -490,57 +659,27 @@ if start_clicked:
     ]
     st.session_state.pending_media_caption = media_caption.strip()
     st.session_state.adaptive_answered = []
-    try:
-        if importing_processed_result:
-            # Nothing to clarify and nothing to analyze — the write-up
-            # already exists; just reformat it into this app's structure.
-            # flow_stage never enters "clarifying" on this path.
-            with st.spinner("Reading the processed interview into this app's structure..."):
-                analysis, imported_metadata = ai.parse_processed_result(
-                    selected_hypotheses,
-                    raw_notes,
-                    api_key,
-                    additional_notes=additional_notes,
-                )
-            _finish_analysis_and_save(
-                analysis, imported_result=True, metadata_suggestion=imported_metadata,
-            )
-        else:
-            with st.spinner("Asking a clarifying question..."):
-                step1 = ai.start_adaptive_clarifying(
-                    selected_hypotheses,
-                    raw_notes,
-                    api_key,
-                    documents=selected_documents,
-                    additional_notes=additional_notes,
-                )
-            st.session_state.adaptive_history = step1["history"]
-            if step1["question"]:
-                st.session_state.adaptive_current_question = step1["question"]
-                st.session_state.adaptive_round = step1["round"]
-                st.session_state.flow_stage = "clarifying"
-            else:
-                # The model decided it needs nothing at all for this
-                # interview — go straight to the full analysis rather than
-                # showing an empty clarifying step with nothing to answer.
-                with st.spinner("Running the full analysis..."):
-                    analysis = ai.run_step2_after_adaptive_clarifying(
-                        st.session_state.adaptive_history, api_key,
-                        documents=selected_documents,
-                    )
-                _finish_analysis_and_save(analysis)
-    except ai.AIError as e:
-        st.error(str(e))
+    for key in _PROC_PENDING_KEYS:
+        st.session_state.pop(key, None)
+    _run_step("start")
+
+if st.session_state.flow_stage == "idle":
+    _render_failure_notice()
 
 if st.session_state.flow_stage == "clarifying":
     st.divider()
-    st.subheader("Clarifying question")
-    st.caption(
-        f"Question {st.session_state.adaptive_round} of "
-        f"{ai.MAX_ADAPTIVE_QUESTIONS} — each one is chosen after seeing your "
-        "last answer (Flipped Interaction: the model interrogates you "
-        "before analyzing anything, rather than the other way around)."
-    )
+    if st.session_state.get("adaptive_current_question") is None:
+        # All questions answered; only the analysis/save is left (shown
+        # here only if it failed and is waiting for "Try again").
+        st.subheader("Clarifying questions done")
+    else:
+        st.subheader("Clarifying question")
+        st.caption(
+            f"Question {st.session_state.adaptive_round} of "
+            f"{ai.MAX_ADAPTIVE_QUESTIONS} — each one is chosen after seeing your "
+            "last answer (Flipped Interaction: the model interrogates you "
+            "before analyzing anything, rather than the other way around)."
+        )
 
     if st.session_state.get("adaptive_answered"):
         with st.expander("Answered so far"):
@@ -549,35 +688,16 @@ if st.session_state.flow_stage == "clarifying":
                 st.markdown(f"**A:** {a or '_(no answer given)_'}")
                 st.markdown("---")
 
-    with st.form("adaptive_answer_form"):
-        answer = st.text_area(st.session_state.adaptive_current_question, key="adaptive_answer_box")
-        submitted = st.form_submit_button("Answer")
+    if st.session_state.get("adaptive_current_question") is not None:
+        with st.form("adaptive_answer_form"):
+            # Keyed per round so each new question starts with an empty box.
+            answer = st.text_area(
+                st.session_state.adaptive_current_question,
+                key=f"adaptive_answer_box_{st.session_state.adaptive_round}",
+            )
+            submitted = st.form_submit_button("Answer")
+        if submitted:
+            st.session_state.proc_pending_answer = answer
+            _run_step("answer")
 
-    if submitted:
-        try:
-            question = st.session_state.adaptive_current_question
-            st.session_state.adaptive_answered.append((question, answer))
-            with st.spinner("Deciding whether it needs anything else..."):
-                nxt = ai.continue_adaptive_clarifying(
-                    st.session_state.adaptive_history,
-                    question,
-                    answer,
-                    st.session_state.adaptive_round,
-                    api_key,
-                    documents=st.session_state.get("selected_documents", []),
-                )
-            st.session_state.adaptive_history = nxt["history"]
-            if nxt["question"]:
-                st.session_state.adaptive_current_question = nxt["question"]
-                st.session_state.adaptive_round = nxt["round"]
-                st.rerun()
-            else:
-                docs_for_step2 = st.session_state.get("selected_documents", [])
-                with st.spinner("Running the full analysis..."):
-                    analysis = ai.run_step2_after_adaptive_clarifying(
-                        st.session_state.adaptive_history, api_key,
-                        documents=docs_for_step2,
-                    )
-                _finish_analysis_and_save(analysis)
-        except ai.AIError as e:
-            st.error(str(e))
+    _render_failure_notice()

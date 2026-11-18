@@ -28,33 +28,52 @@ st.title("Interviews")
 # or drifted since, once per session and before the dropdown is built — so
 # this list can never show a nameless "Interview — <date>" and nobody has
 # to rename one by hand.
+#
+# Page load only does the database-side part (titles from LINKED
+# interviewees, no AI). Reading a name out of the transcript for an
+# interview with no interviewee linked costs one AI call per interview,
+# so it only runs when someone clicks the button below — never silently
+# on load, where it slowed the first visit and could rename interviews.
 if not st.session_state.get("interview_titles_synced"):
     renamed, unnamed = storage.backfill_interview_titles()
-    api_key = env_store.load_api_key()
-    for interview in unnamed:
-        # No interviewee row to read a name off (metadata was skipped, or
-        # the interview predates metadata), so read the name back out of
-        # the transcript with the same suggestion the processing flow
-        # uses. A blank result — no API key, or the call failed, both of
-        # which suggest_metadata returns rather than raises — leaves the
-        # existing title alone instead of replacing it with an equally
-        # nameless one.
-        suggestion = ai.suggest_metadata(interview["raw_text"], api_key)
-        if not suggestion["name_or_label"].strip():
-            continue
-        new_title = storage.build_interview_title(
-            suggestion["name_or_label"],
-            suggestion["rank"],
-            # Interviews are processed the day they happen, and an
-            # interview with no metadata has no recorded interview date —
-            # the day it was saved is the only date on record.
-            interview["created_at"][:10],
-        )
-        storage.update_interview_title(interview["id"], new_title)
-        renamed.append((interview["id"], interview["title"], new_title))
     st.session_state["interview_titles_synced"] = True
+    st.session_state["interviews_without_interviewee"] = [iv["id"] for iv in unnamed]
     for _id, was, now in renamed:
         st.info(f"Renamed to match its interviewee: “{was}” → “{now}”")
+
+_unnamed_ids = st.session_state.get("interviews_without_interviewee") or []
+if _unnamed_ids:
+    with st.expander(f"🏷️ {len(_unnamed_ids)} interview(s) have no interviewee linked"):
+        st.caption(
+            "These keep their current titles. To retitle them from a name "
+            "found in each transcript, click below (one AI call per interview, "
+            "a few seconds each)."
+        )
+        if st.button("Suggest titles from transcripts", key="suggest_unnamed_titles"):
+            api_key = env_store.load_api_key()
+            by_id = {iv["id"]: iv for iv in storage.get_interviews()}
+            with st.spinner(f"Reading {len(_unnamed_ids)} transcript(s) for names..."):
+                for interview_id in _unnamed_ids:
+                    interview = by_id.get(interview_id)
+                    if not interview:
+                        continue
+                    # suggest_metadata never raises; a blank name (no API
+                    # key, or the call failed) leaves the title alone.
+                    suggestion = ai.suggest_metadata(interview["raw_text"], api_key)
+                    if not suggestion["name_or_label"].strip():
+                        continue
+                    new_title = storage.build_interview_title(
+                        suggestion["name_or_label"],
+                        suggestion["rank"],
+                        # An interview with no metadata has no recorded
+                        # interview date; the day it was saved is the only
+                        # date on record.
+                        interview["created_at"][:10],
+                    )
+                    if new_title != interview["title"]:
+                        storage.update_interview_title(interview_id, new_title)
+                        st.info(f"Retitled: “{interview['title']}” → “{new_title}”")
+            st.session_state.pop("interviews_without_interviewee", None)
 
 interviews = storage.get_interviews()
 

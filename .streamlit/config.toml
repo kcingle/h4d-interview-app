@@ -1,0 +1,5 @@
+# Last-resort safety net for live demos: if an error ever slips past the
+# app's own retry notices, show Streamlit's short generic message instead
+# of a red traceback. Set to true locally when debugging.
+[client]
+showErrorDetails = false

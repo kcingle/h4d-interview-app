@@ -514,7 +514,7 @@ else:
                         corpus_context, suggest_api_key
                     )
                 except ai.AIError as e:
-                    st.error(str(e))
+                    st.warning(f"⚠️ {e} Click the button again to retry.")
 
         suggestions = st.session_state.get("hypothesis_suggestions")
         if suggestions is not None:

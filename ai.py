@@ -301,12 +301,23 @@ ANALYSIS_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 
+def _new_client(api_key: str, small: bool = False) -> anthropic.Anthropic:
+    """Every Anthropic client is built here, so all calls share the same
+    timeout and single-retry policy (see config.API_*)."""
+    read_timeout = config.API_TIMEOUT_SMALL_SECONDS if small else config.API_TIMEOUT_SECONDS
+    return anthropic.Anthropic(
+        api_key=api_key,
+        timeout=anthropic.Timeout(read_timeout, connect=config.API_CONNECT_TIMEOUT_SECONDS),
+        max_retries=config.API_MAX_RETRIES,
+    )
+
+
 def _client(api_key: str) -> anthropic.Anthropic:
     if not api_key or not api_key.strip():
         raise AIError(
             "No Anthropic API key is set. Enter one on the Settings page, then try again."
         )
-    return anthropic.Anthropic(api_key=api_key)
+    return _new_client(api_key)
 
 
 def _call(
@@ -353,11 +364,27 @@ def _call(
             "Your Anthropic API key was rejected. Check it on the Settings page."
         )
     except anthropic.RateLimitError:
-        raise AIError("Rate limited by the Anthropic API. Wait a moment and try again.")
+        raise AIError(
+            "The AI service is handling too many requests right now. Nothing was "
+            "lost. Wait about 30 seconds, then try again."
+        )
+    except anthropic.APITimeoutError:
+        raise AIError(
+            "The AI took longer than usual and the request timed out. Nothing "
+            "was lost. Try again; it usually goes through on the next attempt."
+        )
     except anthropic.APIConnectionError:
-        raise AIError("Could not reach the Anthropic API — check your internet connection.")
+        raise AIError(
+            "Couldn't reach the AI service. Check the internet connection, "
+            "then try again. Nothing was lost."
+        )
     except anthropic.APIStatusError as e:
-        raise AIError(f"The Anthropic API returned an error ({e.status_code}): {e.message}")
+        if e.status_code >= 500:
+            raise AIError(
+                f"The AI service is temporarily busy (error {e.status_code}). "
+                "Nothing was lost. Wait a moment, then try again."
+            )
+        raise AIError(f"The AI service returned an error ({e.status_code}): {e.message}")
     except Exception as e:  # last resort — never let a raw exception crash the page
         raise AIError(f"Unexpected error while calling the AI: {e}")
 
@@ -804,7 +831,7 @@ def suggest_metadata(raw_notes: str, api_key: str) -> dict:
     if not api_key or not api_key.strip():
         return dict(BLANK_METADATA)
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = _new_client(api_key, small=True)
         response = client.messages.create(
             model=config.MODEL_NAME_SMALL,
             max_tokens=1024,
@@ -874,7 +901,7 @@ def _suggest_topics(hypotheses: list[str], analysis: dict, api_key: str) -> list
         summary_text = "\n".join(b for b in summary_bits if b)
         hypotheses_line = "; ".join(hypotheses)
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = _new_client(api_key, small=True)
         response = client.messages.create(
             model=config.MODEL_NAME_SMALL,
             max_tokens=256,
