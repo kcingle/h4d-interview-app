@@ -210,17 +210,38 @@ def seed(storage, export_key: str | None):
     print(f"\nInterviews: {len(storage.get_interviews())}, without an interviewee: {unlinked or 'none'}")
 
 
+def export_only(storage, key: str):
+    """Read-only: write the Word report for an already-seeded interview."""
+    from demo import seed_content as content
+    from render import build_export_header
+    from docx_export import build_docx_report
+    item = next(i for i in content.SEED_INTERVIEWS if i["key"] == key)
+    name = item["person"]["name"]
+    person = next(p for p in storage.get_people() if p["name"] == name)
+    interview_id = person["interviews"][0]["id"]
+    interview = storage.get_interview(interview_id)
+    run = storage.get_runs_for_interview(interview_id)[0]
+    header = build_export_header(interview, storage.get_person_for_interview(interview_id), run, [])
+    out = REPO / "demo" / f"fallback_{key}_report.docx"
+    out.write_bytes(build_docx_report(run["output"], run["hypothesis_text"], header=header))
+    print(f"Word report written: {out}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url-file", required=True)
     ap.add_argument("--expect-host", required=True)
     ap.add_argument("--reset", action="store_true")
     ap.add_argument("--export-docx", metavar="KEY")
+    ap.add_argument("--export-only", metavar="KEY", help="write an existing seed interview's Word report; changes nothing")
     args = ap.parse_args()
 
     url = guard(args.url_file, args.expect_host)
     export_key = args.export_docx
     storage = connect_app(url)
+    if args.export_only:
+        export_only(storage, args.export_only)
+        return
     if args.reset:
         reset(storage)
     elif not is_empty(storage):
