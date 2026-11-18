@@ -33,6 +33,7 @@ import ai
 import auth
 import env_store
 import storage
+import ui_feedback
 
 st.set_page_config(page_title="H4D Interview App — Hypotheses", page_icon="🧩")
 auth.require_login()
@@ -507,7 +508,7 @@ else:
             st.warning("No Anthropic API key set yet. Enter one on the **Settings** page first.")
 
         if st.button("Suggest hypotheses", disabled=not suggest_api_key):
-            with st.spinner("Reviewing the corpus..."):
+            with ui_feedback.heartbeat("Reviewing the corpus..."):
                 try:
                     corpus_context = _build_corpus_context_for_suggestions()
                     st.session_state.hypothesis_suggestions = ai.suggest_hypotheses(
