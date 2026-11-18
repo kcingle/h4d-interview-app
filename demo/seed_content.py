@@ -232,3 +232,30 @@ LIVE_ANSWERS = [
     "The one concrete commitment was his offer to test a device with his platoon and write up the results. He did not commit to any purchase, and he said the buying decision sits with the squadron S3 and S6 and with brigade.",
     "We did not ask how often the platoon has lost GPS outside of training center rotations, or what the troop commander did differently once he knew a grid came from a map. Those are next questions for the troop commander.",
 ]
+
+# Made-up visual resources, each attached to a seed interview (files are
+# drawn by demo/make_demo_media.py and labeled as fictional illustrations).
+VISUAL_RESOURCES = [
+    ("okafor", "okafor_whiteboard_reporting_chain.png",
+     "Whiteboard sketch CPT Okafor drew during the interview: where the grid's source gets lost between troop and squadron."),
+    ("treadway", "treadway_map_position_jump.png",
+     "Map sketch of the night the GPS position jumped about 2 km, and the observation post reported 800 m off."),
+    ("vasquez_hart", "vasquez_hart_jamming_timeline.png",
+     "Timeline of intermittent jamming over one night, from CW3 Vasquez-Hart's log."),
+]
+
+# Made-up dictionary entries: (term, definition, is_acronym, expansion, important).
+DICTIONARY = [
+    ("PNT", "The capabilities a unit relies on to know where it is, where it's going, and what time it is. GPS is the most common source.",
+     True, "Positioning, Navigation and Timing", True),
+    ("Spoofing", "Broadcasting fake satellite signals so a receiver confidently shows a wrong position. Harder to notice than jamming because the screen looks healthy.",
+     False, "", True),
+    ("Terrain association", "Navigating by matching features on the map (ridges, draws, roads) to what you see on the ground, without GPS.",
+     False, "", False),
+    ("MEMS", "Very small, low-cost motion sensors like those in phones. Cheap inertial units built on them drift quickly when used alone.",
+     True, "Micro-Electro-Mechanical Systems", False),
+    ("Spot report", "A short report of what a scout sees, including a grid location. If the grid is wrong, everyone acting on it is wrong too.",
+     False, "", False),
+    ("Ground truth / box", "Informal code words invented in the (fictional) Thunder Squadron: \"ground truth\" means a grid from map and terrain, \"box\" means a grid from GPS.",
+     False, "", True),
+]

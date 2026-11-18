@@ -206,8 +206,84 @@ def seed(storage, export_key: str | None):
         print(f"  {key}: {'all quotes word-for-word' if not problems else f'{len(problems)} problem(s)'}")
         for line in problems:
             print(f"     - {line}")
+    add_media_and_terms(storage)
     unlinked = [iv["title"] for iv in storage.get_interviews() if not iv["person_id"]]
     print(f"\nInterviews: {len(storage.get_interviews())}, without an interviewee: {unlinked or 'none'}")
+
+
+def add_media_and_terms(storage):
+    """Attach the made-up visual resources and dictionary terms from
+    demo/seed_content.py. Idempotent: anything already there is skipped.
+    No AI calls."""
+    from demo import seed_content as content
+    by_key = {}
+    for item in content.SEED_INTERVIEWS:
+        person = next((p for p in storage.get_people() if p["name"] == item["person"]["name"]), None)
+        if person and person["interviews"]:
+            by_key[item["key"]] = person["interviews"][0]["id"]
+    have_files = {(r["interview_id"], r["filename"]) for r in storage.get_visual_resources()}
+    media_dir = REPO / "demo" / "media"
+    added_media = 0
+    for key, filename, caption in content.VISUAL_RESOURCES:
+        iid = by_key.get(key)
+        if iid is None or (iid, filename) in have_files:
+            continue
+        storage.add_visual_resource(iid, filename, (media_dir / filename).read_bytes(), "image/png", caption=caption)
+        added_media += 1
+    have_terms = {e["term"] for e in storage.get_dictionary_entries()}
+    added_terms = 0
+    for term, definition, is_acronym, expansion, important in content.DICTIONARY:
+        if term in have_terms:
+            continue
+        entry_id = storage.add_dictionary_entry(term, definition, is_acronym=is_acronym, expansion=expansion)
+        if important:
+            storage.set_dictionary_importance(entry_id, True)
+        added_terms += 1
+    print(f"Added {added_media} visual resource(s) and {added_terms} dictionary term(s).")
+
+
+def clean_extras(storage):
+    """Remove everything added since seeding (rehearsal runs, a practice
+    run, chat dictionary entries, extra hypotheses) and keep the four seed
+    interviews exactly as they are. No AI calls, so the seed outputs and
+    their quote-check results don't change."""
+    from demo import seed_content as content
+    seed_names = {i["person"]["name"] for i in content.SEED_INTERVIEWS}
+    seed_hyps = {text for _, _, text in content.HYPOTHESES}
+    removed = 0
+    for interview in storage.get_interviews():
+        person = storage.get_person_for_interview(interview["id"])
+        if person and person["name"] in seed_names:
+            continue
+        storage.delete_interview(interview["id"])
+        if person:
+            storage.delete_person(person["id"])
+        removed += 1
+    for person in storage.get_people():  # people left with no interview
+        if person["name"] not in seed_names and not person["interviews"]:
+            storage.delete_person(person["id"])
+    seed_terms = {t[0] for t in content.DICTIONARY}
+    for entry in storage.get_dictionary_entries():
+        if entry["term"] not in seed_terms:
+            storage.delete_dictionary_entry(entry["id"])
+    extra_hyps = 0
+    changed = True
+    while changed:  # leaves first, since a node with children can't be deleted
+        changed = False
+        flat, stack = [], list(storage.get_hypothesis_tree())
+        while stack:
+            node = stack.pop()
+            flat.append(node)
+            stack.extend(node.get("children") or [])
+        for node in flat:
+            if node["text"] not in seed_hyps and not node.get("children"):
+                storage.delete_hypothesis(node["id"])
+                extra_hyps += 1
+                changed = True
+    add_media_and_terms(storage)  # restore any seed media/terms removed during a demo
+    left = [(storage.get_person_for_interview(i["id"]) or {}).get("name") for i in storage.get_interviews()]
+    print(f"Removed {removed} extra interview(s) and {extra_hyps} extra hypothesis(es).")
+    print(f"Left: {len(left)} interviews: {sorted(n or '(none)' for n in left)}")
 
 
 def export_only(storage, key: str):
@@ -234,11 +310,21 @@ def main():
     ap.add_argument("--reset", action="store_true")
     ap.add_argument("--export-docx", metavar="KEY")
     ap.add_argument("--export-only", metavar="KEY", help="write an existing seed interview's Word report; changes nothing")
+    ap.add_argument("--add-media-and-terms", action="store_true",
+                    help="attach the made-up visual resources and dictionary terms (no AI calls)")
+    ap.add_argument("--clean-extras", action="store_true",
+                    help="remove everything added since seeding; keep the 4 seed interviews unchanged (no AI calls)")
     args = ap.parse_args()
 
     url = guard(args.url_file, args.expect_host)
     export_key = args.export_docx
     storage = connect_app(url)
+    if args.add_media_and_terms:
+        add_media_and_terms(storage)
+        return
+    if args.clean_extras:
+        clean_extras(storage)
+        return
     if args.export_only:
         export_only(storage, args.export_only)
         return

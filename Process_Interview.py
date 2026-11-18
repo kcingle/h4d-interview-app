@@ -502,13 +502,13 @@ _PROC_PENDING_KEYS = (
 )
 
 WAIT_FIRST_QUESTION = (
-    "Reading the interview and choosing the first clarifying question. "
-    "This takes about 20–40 seconds..."
+    "Reading the interview and choosing the first clarifying question "
+    "(a few seconds)..."
 )
-WAIT_NEXT_QUESTION = "Choosing the next question based on your answer (about 15–30 seconds)..."
+WAIT_NEXT_QUESTION = "Choosing the next question based on your answer (a few seconds)..."
 WAIT_ANALYSIS = (
-    "Analyzing the interview against the selected hypotheses. This takes "
-    "about a minute, sometimes two. Please keep this tab open..."
+    "Analyzing the interview against the selected hypotheses. This usually "
+    "takes about a minute and can take up to 3 minutes. Please keep this tab open..."
 )
 WAIT_IMPORT = (
     "Reading the processed interview into this app's structure. This takes "
