@@ -76,7 +76,7 @@ def _get_or_build_context() -> str:
     force a separate corpus read if Corpus Chat has already built one
     this session."""
     if "chat_corpus_context" not in st.session_state:
-        with st.spinner("Reading the corpus..."):
+        with ui_feedback.heartbeat("Reading the corpus..."):
             st.session_state.chat_corpus_context = _build_context()
     return st.session_state.chat_corpus_context
 
@@ -245,7 +245,7 @@ with tab_chat:
     # rerun, an edited hypothesis), so starting the conversation over
     # avoids mixing stale and fresh context in one exchange.
     if "chat_corpus_context" not in st.session_state or refresh_clicked:
-        with st.spinner("Reading the corpus..."):
+        with ui_feedback.heartbeat("Reading the corpus..."):
             st.session_state.chat_corpus_context = _build_context()
         st.session_state.chat_history = []
         if refresh_clicked:
@@ -284,7 +284,7 @@ with tab_chat:
             with st.chat_message("user"):
                 st.markdown(user_message)
         try:
-            with st.spinner("Reading the interviews and writing an answer (about 10–30 seconds)..."):
+            with ui_feedback.heartbeat("Reading the interviews and writing an answer (about 10–30 seconds)..."):
                 result = ai.run_chat(
                     st.session_state.chat_history,
                     user_message,
@@ -331,7 +331,7 @@ with tab_define:
 
     if explain_clicked:
         try:
-            with st.spinner("Looking it up..."):
+            with ui_feedback.heartbeat("Looking it up..."):
                 context = _get_or_build_context()
                 st.session_state.define_results = ai.define_terms(define_query, context, api_key)
         except ai.AIError as e:

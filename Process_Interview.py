@@ -82,7 +82,7 @@ if st.session_state.flow_stage == "metadata":
     meta_analysis = st.session_state.pending_metadata_analysis
 
     if st.session_state.get("metadata_suggestion_for") != meta_interview_id:
-        with st.spinner("Suggesting interviewee metadata..."):
+        with ui_feedback.heartbeat("Suggesting interviewee metadata..."):
             st.session_state.metadata_suggestion = ai.suggest_metadata(meta_raw_text, api_key)
             st.session_state.metadata_suggestion_for = meta_interview_id
 
@@ -187,7 +187,7 @@ if st.session_state.flow_stage == "metadata":
 
                 # Refresh this run's digest now that the interviewee is known.
                 person = storage.get_person(person_id)
-                with st.spinner("Saving the interviewee details (a few seconds)..."):
+                with ui_feedback.heartbeat("Saving the interviewee details (a few seconds)..."):
                     refreshed_digest = ai.build_digest(
                         meta_hypotheses, meta_analysis, meta_raw_text, api_key,
                         person, additional_notes=meta_notes or "",
@@ -405,7 +405,7 @@ def _finish_analysis_and_save(
     # confirmed yet; that happens in the metadata stage right below,
     # which regenerates this digest once the person is known.
     if st.session_state.get("proc_digest") is None:
-        with st.spinner("Indexing quotes and topics for search (a few seconds)..."):
+        with ui_feedback.heartbeat("Indexing quotes and topics for search (a few seconds)..."):
             st.session_state.proc_digest = ai.build_digest(
                 hypotheses_for_run, analysis, raw_notes, api_key,
                 person=None, additional_notes=additional_notes,
@@ -423,7 +423,7 @@ def _finish_analysis_and_save(
     elif st.session_state.get("proc_suggestion") is not None:
         suggestion = st.session_state.proc_suggestion
     else:
-        with st.spinner("Identifying the interviewee (a few seconds)..."):
+        with ui_feedback.heartbeat("Identifying the interviewee (a few seconds)..."):
             suggestion = ai.suggest_metadata(raw_notes, api_key)
     st.session_state.proc_suggestion = suggestion
     title = storage.build_interview_title(
@@ -522,7 +522,7 @@ def _analyze_and_save():
     database failure during the save never costs another minute-long AI
     call on retry."""
     if st.session_state.get("proc_pending_analysis") is None:
-        with st.spinner(WAIT_ANALYSIS):
+        with ui_feedback.heartbeat(WAIT_ANALYSIS):
             st.session_state.proc_pending_analysis = ai.run_step2_after_adaptive_clarifying(
                 st.session_state.adaptive_history, api_key,
                 documents=st.session_state.get("selected_documents", []),
@@ -537,7 +537,7 @@ def _do_start():
         # already exists; just reformat it into this app's structure.
         # flow_stage never enters "clarifying" on this path.
         if st.session_state.get("proc_pending_analysis") is None:
-            with st.spinner(WAIT_IMPORT):
+            with ui_feedback.heartbeat(WAIT_IMPORT):
                 analysis, imported_metadata = ai.parse_processed_result(
                     st.session_state.get("selected_hypotheses") or selected_hypotheses,
                     raw_notes,
@@ -550,7 +550,7 @@ def _do_start():
             }
         _analyze_and_save()
         return
-    with st.spinner(WAIT_FIRST_QUESTION):
+    with ui_feedback.heartbeat(WAIT_FIRST_QUESTION):
         step1 = ai.start_adaptive_clarifying(
             st.session_state.get("selected_hypotheses") or selected_hypotheses,
             raw_notes,
@@ -579,7 +579,7 @@ def _do_answer():
     retry after a failure never records it twice."""
     question = st.session_state.adaptive_current_question
     answer = st.session_state.get("proc_pending_answer", "")
-    with st.spinner(WAIT_NEXT_QUESTION):
+    with ui_feedback.heartbeat(WAIT_NEXT_QUESTION):
         nxt = ai.continue_adaptive_clarifying(
             st.session_state.adaptive_history,
             question,
